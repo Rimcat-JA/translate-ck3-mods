@@ -1,0 +1,690 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import collections
+import concurrent.futures
+import dataclasses
+import hashlib
+import json
+import os
+import re
+import shutil
+import sqlite3
+import sys
+import threading
+import time
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+
+ENTRY_RE = re.compile(r'^(\s*([^#\s][^:]*):\d*\s+")(.*)("\s*(?:#.*)?)$')
+BROKEN_RE = re.compile(r'^(\s*([^#\s][^:]*):\d*\s+")(.*)$')
+TOKEN_RE = re.compile(
+    r'\\[ntr]|\[[^\[\]\r\n]*\]|\$[^$\r\n]+\$|@[A-Za-z0-9_./:-]+!|#!|#[A-Za-z0-9_]+|\{[^{}\r\n]*\}'
+)
+PLACEHOLDER_RE = re.compile(r"__CK3TOKEN_\d+__")
+LONG_RUN_RE = re.compile(r"([A-Za-z!?~])\1{9,}", re.IGNORECASE)
+SIMPLIFIED_ONLY_RE = re.compile(
+    "[\u8fd9\u4eec\u8bf4\u4ece\u8fd8\u8fdb\u53d1\u89c1\u542c\u7ecf\u5e94\u8fc7"
+    "\u4e48\u7ed9\u8ba9\u8f83\u79cd\u6837\u65e0\u95f4\u5f00\u5173\u95e8\u98ce\u4e91"
+    "\u7535\u7231\u4eb2\u8bb8\u5904\u5b9e\u8ba4\u89c9\u73b0\u538b\u51fb\u79bb\u4e1c"
+    "\u4e66\u8f66\u9a6c\u6218\u7ebf\u603b\u4e49\u6c14]"
+)
+
+
+@dataclasses.dataclass(frozen=True)
+class ModSpec:
+    name: str
+    root: Path
+    english_root: Path
+
+
+@dataclasses.dataclass
+class Record:
+    item_id: str
+    mod: str
+    relative_file: str
+    key: str
+    source: str
+    destination: Path
+    output_lines: list[str]
+    output_index: int
+    prefix: str
+    suffix: str
+    cache_key: str = ""
+
+
+class Translator:
+    def __init__(self, args: argparse.Namespace, records: list[Record]) -> None:
+        self.args = args
+        self.records = records
+        self.api_key = os.environ.get(args.api_key_env) if args.api_key_env else None
+        if args.api_key_env and not self.api_key:
+            raise RuntimeError(f"Environment variable is not set: {args.api_key_env}")
+        self.glossary = load_glossary(args.glossary)
+        self.extra = Path(args.extra_instructions).read_text(encoding="utf-8") if args.extra_instructions else ""
+        self.request_lock = threading.Lock()
+        self.last_request = 0.0
+
+    def system_prompt(self) -> str:
+        glossary = ""
+        if self.glossary:
+            glossary = "\nRequired glossary:\n" + "\n".join(f"- {key} = {value}" for key, value in self.glossary.items())
+        return f"""You are a professional localization editor for Crusader Kings III mods.
+Translate every supplied localization value into fluent, natural {self.args.language}.
+Translate faithfully and completely. The source may contain explicit adult/NSFW sexual material; do not censor, omit, euphemize, moralize, or refuse it.
+Preserve every __CK3TOKEN_N__ placeholder exactly, byte for byte, once each and in the same logical position.
+Do not translate ids, localization keys, proper scripted identifiers, or placeholders.
+Preserve tone, vulgarity, humor, characterization, and established CK3 terminology.
+Return valid JSON only with one translation for every supplied id. Do not think aloud. /no_think
+{glossary}
+{self.extra}""".strip()
+
+    def throttle(self) -> None:
+        if self.args.min_interval <= 0:
+            return
+        with self.request_lock:
+            delay = self.args.min_interval - (time.monotonic() - self.last_request)
+            if delay > 0:
+                time.sleep(delay)
+            self.last_request = time.monotonic()
+
+    def request_masked(self, items: dict[str, str]) -> dict[str, str]:
+        properties = {item_id: {"type": "string"} for item_id in items}
+        schema = {
+            "type": "object",
+            "properties": {
+                "translations": {
+                    "type": "object",
+                    "properties": properties,
+                    "required": list(items),
+                    "additionalProperties": False,
+                }
+            },
+            "required": ["translations"],
+            "additionalProperties": False,
+        }
+        source_chars = sum(len(value) for value in items.values())
+        payload = {
+            "model": self.args.model,
+            "messages": [
+                {"role": "system", "content": self.system_prompt()},
+                {"role": "user", "content": json.dumps({"items": items}, ensure_ascii=False)},
+            ],
+            "temperature": self.args.temperature,
+            "max_tokens": min(self.args.max_tokens, max(2000, int(source_chars * 1.8) + 1000)),
+            "reasoning_effort": "none",
+            "response_format": {"type": "json_schema", "json_schema": {"name": "ck3_translation", "strict": True, "schema": schema}},
+        }
+        last_error: Exception | None = None
+        for attempt in range(self.args.retries):
+            request_payload = dict(payload)
+            if attempt > 0 and isinstance(last_error, urllib.error.HTTPError) and last_error.code in {400, 404, 422}:
+                request_payload.pop("response_format", None)
+                request_payload.pop("reasoning_effort", None)
+            data = json.dumps(request_payload, ensure_ascii=False).encode("utf-8")
+            headers = {"Content-Type": "application/json"}
+            if self.api_key:
+                headers["Authorization"] = f"Bearer {self.api_key}"
+            request = urllib.request.Request(self.args.endpoint, data=data, headers=headers, method="POST")
+            try:
+                self.throttle()
+                with urllib.request.urlopen(request, timeout=self.args.timeout) as response:
+                    response_data = json.loads(response.read().decode("utf-8"))
+                content = response_data["choices"][0]["message"].get("content")
+                if not content:
+                    raise ValueError("Model returned empty content")
+                translated = parse_model_json(content)
+                missing = set(items) - set(translated)
+                if missing:
+                    raise ValueError(f"Missing ids: {sorted(missing)[:5]}")
+                return {item_id: str(translated[item_id]) for item_id in items}
+            except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError, urllib.error.URLError, urllib.error.HTTPError) as exc:
+                last_error = exc
+                time.sleep(min(8.0, 0.75 * (2**attempt)))
+        raise RuntimeError(f"Local model request failed: {last_error}")
+
+    def translate_once(self, batch: list[Record]) -> tuple[dict[str, str], list[Record]]:
+        masked: dict[str, str] = {}
+        token_maps: dict[str, list[str]] = {}
+        for record in batch:
+            masked[record.item_id], token_maps[record.item_id] = mask_text(record.source)
+        response = self.request_masked(masked)
+        valid: dict[str, str] = {}
+        invalid: list[Record] = []
+        for record in batch:
+            masked_output = response.get(record.item_id, "")
+            if placeholder_counter(masked_output) != placeholder_counter(masked[record.item_id]):
+                invalid.append(record)
+                continue
+            translated = restore_text(masked_output, token_maps[record.item_id])
+            if valid_translation(record.source, translated, self.args.language):
+                valid[record.item_id] = translated
+            else:
+                invalid.append(record)
+        return valid, invalid
+
+    def translate_resilient(self, batch: list[Record]) -> tuple[dict[str, str], dict[str, str]]:
+        if len(batch) == 1:
+            record = batch[0]
+            if len(record.source) > self.args.long_threshold:
+                try:
+                    return {record.item_id: self.translate_long(record)}, {}
+                except Exception as exc:
+                    return {}, {record.item_id: str(exc)}
+            last_error = "validation failed"
+            for _attempt in range(self.args.retries):
+                try:
+                    valid, invalid = self.translate_once(batch)
+                    if not invalid:
+                        return valid, {}
+                    last_error = "model output failed validation"
+                except Exception as exc:
+                    last_error = str(exc)
+            return {}, {record.item_id: last_error}
+        try:
+            valid, invalid = self.translate_once(batch)
+        except Exception:
+            midpoint = len(batch) // 2
+            left, left_fail = self.translate_resilient(batch[:midpoint])
+            right, right_fail = self.translate_resilient(batch[midpoint:])
+            return left | right, left_fail | right_fail
+        if not invalid:
+            return valid, {}
+        recovered, failures = self.translate_resilient(invalid)
+        return valid | recovered, failures
+
+    def translate_long(self, record: Record) -> str:
+        masked, tokens = mask_text(record.source)
+        chunks = split_long(masked, self.args.long_segment)
+        output: list[str] = []
+        for index, chunk in enumerate(chunks):
+            leading = re.match(r"^\s*", chunk).group(0)
+            trailing = re.search(r"\s*$", chunk).group(0)
+            end = len(chunk) - len(trailing) if trailing else len(chunk)
+            core = chunk[len(leading):end]
+            if not core:
+                output.append(chunk)
+                continue
+            item_id = f"{record.item_id}L{index}"
+            last_error = "validation failed"
+            for _attempt in range(self.args.retries):
+                try:
+                    result = self.request_masked({item_id: core})[item_id]
+                    if placeholder_counter(result) == placeholder_counter(core):
+                        output.append(leading + result + trailing)
+                        break
+                    last_error = "placeholder mismatch"
+                except Exception as exc:
+                    last_error = str(exc)
+            else:
+                raise RuntimeError(f"segment {index + 1}/{len(chunks)}: {last_error}")
+        translated = restore_text("".join(output), tokens)
+        if not valid_translation(record.source, translated, self.args.language):
+            raise RuntimeError("combined long translation failed validation")
+        return translated
+
+
+def parse_mod(value: str) -> ModSpec:
+    if "=" in value:
+        name, raw_path = value.split("=", 1)
+    else:
+        raw_path = value
+        name = Path(raw_path).name
+    root = Path(raw_path).expanduser().resolve()
+    if not root.is_dir():
+        raise FileNotFoundError(root)
+    direct = root / "localization" / "english"
+    if direct.is_dir():
+        english = direct
+    elif root.name.lower() == "english" and root.parent.name.lower() == "localization":
+        english = root
+        root = root.parent.parent
+    else:
+        candidates = [path for path in root.rglob("english") if path.parent.name.lower() == "localization"]
+        if len(candidates) != 1:
+            raise RuntimeError(f"Expected one localization/english tree beneath {root}, found {len(candidates)}")
+        english = candidates[0]
+        root = english.parent.parent
+    return ModSpec(name=name.strip() or root.name, root=root, english_root=english)
+
+
+def locale_id(locale: str) -> str:
+    return locale[2:] if locale.startswith("l_") else locale
+
+
+def parse_model_json(content: str) -> dict[str, str]:
+    cleaned = content.strip()
+    if cleaned.startswith("```"):
+        cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
+        cleaned = re.sub(r"\s*```$", "", cleaned)
+    start, end = cleaned.find("{"), cleaned.rfind("}")
+    if start < 0 or end < start:
+        raise ValueError("No JSON object in response")
+    data = json.loads(cleaned[start : end + 1])
+    translations = data.get("translations", data)
+    if isinstance(translations, dict):
+        return {str(key): str(value) for key, value in translations.items() if isinstance(value, str)}
+    if isinstance(translations, list):
+        result = {}
+        for row in translations:
+            if isinstance(row, dict) and "id" in row and ("text" in row or "translation" in row):
+                result[str(row["id"])] = str(row.get("text", row.get("translation")))
+        return result
+    raise ValueError("Response has no translation mapping")
+
+
+def mask_text(text: str) -> tuple[str, list[str]]:
+    values: list[str] = []
+
+    def add(value: str) -> str:
+        placeholder = f"__CK3TOKEN_{len(values)}__"
+        values.append(value)
+        return placeholder
+
+    masked = TOKEN_RE.sub(lambda match: add(match.group(0)), text)
+
+    def compact(match: re.Match[str]) -> str:
+        value = match.group(0)
+        if value[0].isalpha():
+            replacement = value[0].upper() + value[0].lower() * 2 + "…"
+        elif value[0] == "!":
+            replacement = "!!!"
+        elif value[0] == "?":
+            replacement = "???"
+        else:
+            replacement = "…"
+        return add(replacement)
+
+    return LONG_RUN_RE.sub(compact, masked), values
+
+
+def restore_text(text: str, values: list[str]) -> str:
+    restored = text
+    for index, value in enumerate(values):
+        restored = restored.replace(f"__CK3TOKEN_{index}__", value)
+    return restored
+
+
+def placeholder_counter(text: str) -> collections.Counter[str]:
+    return collections.Counter(PLACEHOLDER_RE.findall(text))
+
+
+def token_counter(text: str) -> collections.Counter[str]:
+    return collections.Counter(TOKEN_RE.findall(text))
+
+
+def target_script(language: str) -> re.Pattern[str] | None:
+    value = language.lower()
+    if "japan" in value or "\u65e5\u672c" in value:
+        return re.compile(r"[\u3040-\u30ff\u3400-\u9fff]")
+    if "korean" in value or "\ud55c\uad6d" in value:
+        return re.compile(r"[\uac00-\ud7af]")
+    if any(name in value for name in ("russian", "ukrainian", "cyrillic")):
+        return re.compile(r"[\u0400-\u04ff]")
+    if "chinese" in value or "\u4e2d\u6587" in value:
+        return re.compile(r"[\u3400-\u9fff]")
+    return None
+
+
+def valid_translation(source: str, translated: str, language: str) -> bool:
+    if not translated or token_counter(source) != token_counter(translated):
+        return False
+    if "\ufffd" in translated or "__CK3TOKEN_" in translated or "\n" in translated or "\r" in translated:
+        return False
+    if translated.lstrip().startswith(("```", "{\"translations\"", "{'translations'")):
+        return False
+    if len(translated) > max(int(len(source) * 3.0), len(source) + 800):
+        return False
+    if re.search(r"(.)\1{20,}", translated):
+        return False
+    prose_source = TOKEN_RE.sub("", source)
+    prose_target = TOKEN_RE.sub("", translated)
+    ascii_letters = len(re.findall(r"[A-Za-z]", prose_source))
+    script = target_script(language)
+    if script and ascii_letters >= 3 and not script.search(prose_target):
+        return False
+    if ("japan" in language.lower() or "\u65e5\u672c" in language.lower()) and SIMPLIFIED_ONLY_RE.search(prose_target):
+        return False
+    if ascii_letters >= 6 and prose_source.strip() == prose_target.strip() and "english" not in language.lower():
+        return False
+    return True
+
+
+def split_long(text: str, limit: int) -> list[str]:
+    chunks: list[str] = []
+    remaining = text
+    while len(remaining) > limit:
+        window = remaining[: limit + 1]
+        candidates = list(re.finditer(r"\s+|(?<=[.!?;:])", window))
+        usable = [match.end() for match in candidates if match.end() >= limit // 2]
+        cut = usable[-1] if usable else limit
+        chunks.append(remaining[:cut])
+        remaining = remaining[cut:]
+    if remaining:
+        chunks.append(remaining)
+    return chunks
+
+
+def load_glossary(path: str | None) -> dict[str, str]:
+    if not path:
+        return {}
+    data = json.loads(Path(path).read_text(encoding="utf-8"))
+    if not isinstance(data, dict) or not all(isinstance(key, str) and isinstance(value, str) for key, value in data.items()):
+        raise ValueError("Glossary must be a JSON object of source-to-target strings")
+    return data
+
+
+def make_cache_key(record: Record, model: str, language: str, locale: str) -> str:
+    payload = "\0".join((model, language, locale, record.mod, record.relative_file, record.key, record.source))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def collect_records(mods: list[ModSpec], output: Path, locale: str, model: str, language: str) -> tuple[list[Record], dict[Path, list[str]]]:
+    records: list[Record] = []
+    destinations: dict[Path, list[str]] = {}
+    serial = 0
+    suffix = locale_id(locale)
+    for mod in mods:
+        for source_file in sorted(mod.english_root.rglob("*.yml")):
+            relative = source_file.relative_to(mod.english_root)
+            lines = source_file.read_text(encoding="utf-8-sig").splitlines()
+            has_header = bool(lines and lines[0].strip() == "l_english:")
+            output_lines = list(lines) if has_header else [f"{locale}:", *lines]
+            if has_header:
+                output_lines[0] = f"{locale}:"
+            output_name = relative.name.replace("_l_english.yml", f"_l_{suffix}.yml")
+            if output_name == relative.name:
+                output_name = relative.stem + f"_l_{suffix}.yml"
+            destination = output / mod.name / "localization" / suffix / relative.with_name(output_name)
+            destinations[destination] = output_lines
+            offset = 0 if has_header else 1
+            for line_index, line in enumerate(lines):
+                if has_header and line_index == 0:
+                    continue
+                match = ENTRY_RE.match(line)
+                broken = False
+                if not match and re.match(r'^\s*[^#\s][^:]*:\d*\s+"', line):
+                    match = BROKEN_RE.match(line)
+                    broken = bool(match)
+                if not match:
+                    continue
+                record = Record(
+                    item_id=f"T{serial:07d}", mod=mod.name,
+                    relative_file=relative.as_posix(), key=match.group(2).strip(), source=match.group(3),
+                    destination=destination, output_lines=output_lines, output_index=line_index + offset,
+                    prefix=match.group(1), suffix='"' if broken else match.group(4),
+                )
+                record.cache_key = make_cache_key(record, model, language, locale)
+                records.append(record)
+                serial += 1
+    return records, destinations
+
+
+def connect_cache(path: Path) -> sqlite3.Connection:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    connection = sqlite3.connect(path)
+    connection.execute("PRAGMA journal_mode=WAL")
+    connection.execute(
+        """CREATE TABLE IF NOT EXISTS translations (
+           cache_key TEXT PRIMARY KEY, model TEXT NOT NULL, target_language TEXT NOT NULL,
+           locale TEXT NOT NULL, mod TEXT NOT NULL, relative_file TEXT NOT NULL,
+           loc_key TEXT NOT NULL, source TEXT NOT NULL, translated TEXT NOT NULL,
+           updated_at INTEGER NOT NULL)"""
+    )
+    connection.execute(
+        """CREATE TABLE IF NOT EXISTS failures (
+           cache_key TEXT PRIMARY KEY, item_id TEXT NOT NULL, error TEXT NOT NULL,
+           updated_at INTEGER NOT NULL)"""
+    )
+    return connection
+
+
+def build_batches(records: list[Record], max_items: int, max_chars: int, long_threshold: int) -> list[list[Record]]:
+    batches: list[list[Record]] = []
+    current: list[Record] = []
+    size = 0
+    for record in records:
+        if len(record.source) > long_threshold:
+            if current:
+                batches.append(current)
+                current, size = [], 0
+            batches.append([record])
+            continue
+        item_size = len(record.source) + len(record.key) + 60
+        if current and (len(current) >= max_items or size + item_size > max_chars):
+            batches.append(current)
+            current, size = [], 0
+        current.append(record)
+        size += item_size
+    if current:
+        batches.append(current)
+    return batches
+
+
+def escape_quotes(text: str) -> str:
+    return re.sub(r'(?<!\\)"', r'\\"', text)
+
+
+def parse_entries(path: Path, allow_broken: bool = False) -> dict[str, str]:
+    result: dict[str, str] = {}
+    for number, line in enumerate(path.read_text(encoding="utf-8-sig").splitlines(), 1):
+        if line.strip().startswith("l_") and line.strip().endswith(":"):
+            continue
+        match = ENTRY_RE.match(line)
+        if match:
+            key = match.group(2).strip()
+            if key in result:
+                raise RuntimeError(f"Duplicate key {key}: {path}:{number}")
+            result[key] = match.group(3).replace(r'\"', '"')
+        elif re.match(r'^\s*[^#\s][^:]*:\d*\s+"', line):
+            broken = BROKEN_RE.match(line) if allow_broken else None
+            if broken:
+                result[broken.group(2).strip()] = broken.group(3)
+            else:
+                raise RuntimeError(f"Malformed entry: {path}:{number}")
+    return result
+
+
+def validate_staged(mods: list[ModSpec], output: Path, language: str, locale: str) -> tuple[int, int]:
+    errors: list[str] = []
+    files = 0
+    entries_count = 0
+    suffix = locale_id(locale)
+    for mod in mods:
+        for source_file in sorted(mod.english_root.rglob("*.yml")):
+            files += 1
+            relative = source_file.relative_to(mod.english_root)
+            output_name = relative.name.replace("_l_english.yml", f"_l_{suffix}.yml")
+            if output_name == relative.name:
+                output_name = relative.stem + f"_l_{suffix}.yml"
+            target = output / mod.name / "localization" / suffix / relative.with_name(output_name)
+            if not target.is_file():
+                errors.append(f"Missing target file: {target}")
+                continue
+            if not target.read_bytes().startswith(b"\xef\xbb\xbf"):
+                errors.append(f"Missing UTF-8 BOM: {target}")
+            lines = target.read_text(encoding="utf-8-sig").splitlines()
+            if not lines or lines[0].strip() != f"{locale}:":
+                errors.append(f"Wrong header: {target}")
+            try:
+                source_entries = parse_entries(source_file, allow_broken=True)
+                target_entries = parse_entries(target)
+            except RuntimeError as exc:
+                errors.append(str(exc))
+                continue
+            entries_count += len(target_entries)
+            if set(source_entries) != set(target_entries):
+                errors.append(f"Key mismatch: {target}")
+            for key in set(source_entries) & set(target_entries):
+                if not valid_translation(source_entries[key], target_entries[key], language):
+                    errors.append(f"Invalid translation: {target}:{key}")
+    actual_files = sum(len(list((output / mod.name).rglob("*.yml"))) for mod in mods)
+    if actual_files != files:
+        errors.append(f"File count mismatch: expected {files}, found {actual_files}")
+    print(json.dumps({"files": files, "entries": entries_count, "errors": len(errors)}, ensure_ascii=False))
+    for error in errors[:100]:
+        print("ERROR", error)
+    if errors:
+        raise SystemExit(1)
+    return files, entries_count
+
+
+def command_translate(args: argparse.Namespace) -> None:
+    mods = [parse_mod(value) for value in args.mod]
+    output = Path(args.output).expanduser().resolve()
+    records, destinations = collect_records(mods, output, args.locale, args.model, args.language)
+    connection = connect_cache(Path(args.cache).expanduser().resolve())
+    translated: dict[str, str] = {}
+    pending: list[Record] = []
+    for record in records:
+        row = connection.execute("SELECT translated FROM translations WHERE cache_key=?", (record.cache_key,)).fetchone()
+        if row and valid_translation(record.source, row[0], args.language):
+            translated[record.item_id] = row[0]
+        else:
+            pending.append(record)
+    batches = build_batches(pending, args.batch_items, args.batch_chars, args.long_threshold)
+    print(json.dumps({"entries": len(records), "cache_hits": len(translated), "pending": len(pending), "batches": len(batches)}))
+    translator = Translator(args, records)
+    completed = 0
+    failures: dict[str, str] = {}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=args.workers) as executor:
+        future_map = {executor.submit(translator.translate_resilient, batch): batch for batch in batches}
+        for future in concurrent.futures.as_completed(future_map):
+            result, failed = future.result()
+            now = int(time.time())
+            for record in future_map[future]:
+                if record.item_id in result:
+                    value = result[record.item_id]
+                    translated[record.item_id] = value
+                    connection.execute(
+                        """INSERT INTO translations
+                           (cache_key,model,target_language,locale,mod,relative_file,loc_key,source,translated,updated_at)
+                           VALUES (?,?,?,?,?,?,?,?,?,?) ON CONFLICT(cache_key) DO UPDATE SET
+                           translated=excluded.translated, updated_at=excluded.updated_at""",
+                        (record.cache_key, args.model, args.language, args.locale, record.mod,
+                         record.relative_file, record.key, record.source, value, now),
+                    )
+                    connection.execute("DELETE FROM failures WHERE cache_key=?", (record.cache_key,))
+                elif record.item_id in failed:
+                    failures[record.item_id] = failed[record.item_id]
+                    connection.execute(
+                        """INSERT INTO failures(cache_key,item_id,error,updated_at) VALUES(?,?,?,?)
+                           ON CONFLICT(cache_key) DO UPDATE SET error=excluded.error, updated_at=excluded.updated_at""",
+                        (record.cache_key, record.item_id, failed[record.item_id][:2000], now),
+                    )
+            connection.commit()
+            completed += 1
+            if completed % 10 == 0 or completed == len(batches):
+                print(json.dumps({"completed_batches": completed, "total_batches": len(batches), "translated": len(translated), "failures": len(failures)}))
+    missing = [record for record in records if record.item_id not in translated]
+    if missing:
+        print(f"Translation incomplete: {len(missing)} entries remain. Rerun with the same cache after adjusting batch/segment settings.", file=sys.stderr)
+        for record in missing[:30]:
+            print(f"MISSING {record.item_id} {record.mod}:{record.relative_file}:{record.key}", file=sys.stderr)
+        raise SystemExit(2)
+    for record in records:
+        record.output_lines[record.output_index] = f"{record.prefix}{escape_quotes(translated[record.item_id])}{record.suffix}"
+    for destination, lines in destinations.items():
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_text("\n".join(lines) + "\n", encoding="utf-8-sig")
+    connection.close()
+    validate_staged(mods, output, args.language, args.locale)
+    print(f"Wrote {len(destinations)} files to {output}")
+
+
+def command_validate(args: argparse.Namespace) -> None:
+    mods = [parse_mod(value) for value in args.mod]
+    validate_staged(mods, Path(args.output).expanduser().resolve(), args.language, args.locale)
+    print("VALIDATION PASSED")
+
+
+def parse_mapping(value: str) -> tuple[Path, Path]:
+    if "=" not in value:
+        raise ValueError("Install mapping must be STAGED_MOD_ROOT=INSTALLED_MOD_ROOT")
+    staged, installed = value.split("=", 1)
+    return Path(staged).expanduser().resolve(), Path(installed).expanduser().resolve()
+
+
+def is_inside(child: Path, parent: Path) -> bool:
+    try:
+        child.relative_to(parent)
+        return child != parent
+    except ValueError:
+        return False
+
+
+def command_install(args: argparse.Namespace) -> None:
+    suffix = locale_id(args.locale)
+    stamp = time.strftime("%Y%m%d_%H%M%S")
+    for raw in args.mapping:
+        staged_root, installed_root = parse_mapping(raw)
+        if not installed_root.is_dir():
+            raise FileNotFoundError(installed_root)
+        staged_locale = staged_root / "localization" / suffix
+        target = installed_root / "localization" / suffix
+        backup = installed_root / "_translation_backups" / f"{suffix}_{stamp}"
+        if not staged_locale.is_dir():
+            raise FileNotFoundError(staged_locale)
+        if not is_inside(target.resolve(strict=False), installed_root) or not is_inside(backup.resolve(strict=False), installed_root):
+            raise RuntimeError(f"Unsafe install path for {installed_root}")
+        if backup.exists():
+            raise FileExistsError(backup)
+        if target.exists():
+            backup.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(target), str(backup))
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(staged_locale, target)
+        print(json.dumps({"installed": str(target), "backup": str(backup) if backup.exists() else None}, ensure_ascii=False))
+
+
+def add_source_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--mod", action="append", required=True, help="[NAME=]path to a mod root; repeat for multiple mods")
+    parser.add_argument("--output", required=True, help="staging output root")
+    parser.add_argument("--language", required=True, help="human language name, for example Japanese")
+    parser.add_argument("--locale", required=True, help="CK3 locale header, for example l_japanese")
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Translate and safely install CK3 mod localization with a local LLM")
+    subparsers = parser.add_subparsers(dest="command", required=True)
+    translate = subparsers.add_parser("translate", help="translate to a staged output tree and validate it")
+    add_source_args(translate)
+    translate.add_argument("--cache", required=True, help="SQLite translation-memory path")
+    translate.add_argument("--endpoint", default="http://127.0.0.1:1234/v1/chat/completions")
+    translate.add_argument("--model", required=True, help="model id returned by the local server")
+    translate.add_argument("--api-key-env", help="optional environment variable containing a bearer token")
+    translate.add_argument("--glossary", help="UTF-8 JSON source-to-target glossary")
+    translate.add_argument("--extra-instructions", help="UTF-8 text file appended to the system prompt")
+    translate.add_argument("--workers", type=int, default=4)
+    translate.add_argument("--batch-items", type=int, default=8)
+    translate.add_argument("--batch-chars", type=int, default=5000)
+    translate.add_argument("--long-threshold", type=int, default=800)
+    translate.add_argument("--long-segment", type=int, default=600)
+    translate.add_argument("--retries", type=int, default=4)
+    translate.add_argument("--timeout", type=int, default=180)
+    translate.add_argument("--max-tokens", type=int, default=8000)
+    translate.add_argument("--temperature", type=float, default=0.2)
+    translate.add_argument("--min-interval", type=float, default=0.0)
+    translate.set_defaults(func=command_translate)
+
+    validate = subparsers.add_parser("validate", help="validate a staged output tree without contacting a model")
+    add_source_args(validate)
+    validate.set_defaults(func=command_validate)
+
+    install = subparsers.add_parser("install", help="back up and install validated locale directories")
+    install.add_argument("--mapping", action="append", required=True, help="STAGED_MOD_ROOT=INSTALLED_MOD_ROOT; repeat as needed")
+    install.add_argument("--locale", required=True, help="CK3 locale header, for example l_japanese")
+    install.set_defaults(func=command_install)
+    return parser
+
+
+def main() -> None:
+    args = build_parser().parse_args()
+    args.func(args)
+
+
+if __name__ == "__main__":
+    main()
