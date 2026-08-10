@@ -1,0 +1,4 @@
+interface:
+  display_name: "Translate CK3 Mods"
+  short_description: "Translate CK3 mod localization with a local LLM"
+  default_prompt: "Use $translate-ck3-mods to translate these CK3 mods into Japanese with my local LM Studio model."
