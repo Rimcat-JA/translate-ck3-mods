@@ -1,63 +1,83 @@
 # translate-ck3-mods
 
-ローカルLLMを使ってCrusader Kings III（CK3）のMODを任意の言語へ翻訳する、Codex／Claude Code互換スキルです。
+**English** | [日本語](README.ja.md)
 
-LM Studio、Ollama、llama.cpp、vLLMなどのOpenAI互換APIを利用し、翻訳結果をSQLiteへ逐次保存します。長いMODでも中断・再開でき、既に翻訳した文章を再利用できます。
+A Codex and Claude Code compatible skill for translating Crusader Kings III mods into a user-selected language with a local LLM.
 
-## 主な機能
+It works with OpenAI-compatible endpoints exposed by LM Studio, Ollama, llama.cpp, vLLM, and similar runtimes. Completed translations are stored incrementally in SQLite, so large projects can be interrupted, resumed, and reused without retranslating finished entries.
 
-- 複数のCK3 MODを一括翻訳
-- 日本語を含む任意の翻訳先言語と`l_<locale>`ヘッダーに対応
-- `$VALUE$`、`[Character.GetName]`、`#EMP`、`#!`、`@icon!`などのCK3構文を保護
-- 長文の安全な分割と失敗項目のみの再試行
-- SQLite翻訳メモリによる中断・再開
-- 成人向け／NSFW文章を省略・検閲しない翻訳指示
-- UTF-8 BOM、ファイル数、キー、トークン、物理改行、文字化けの検証
-- 既存翻訳を`localization`外へ退避してから安全に導入
-- APIキー、モデル、PC固有パスをリポジトリへ保存しない設計
+## Features
 
-## 必要なもの
+- Translate one or more CK3 mods in a single run
+- Support Japanese and other user-selected target languages and `l_<locale>` headers
+- Protect CK3 syntax such as `$VALUE$`, `[Character.GetName]`, `#EMP`, `#!`, and `@icon!`
+- Split long entries safely and retry only failed records
+- Resume from a SQLite translation-memory cache
+- Instruct the model to translate adult/NSFW text faithfully without censorship or omission
+- Validate UTF-8 BOM, file counts, keys, tokens, physical newlines, placeholders, and encoding errors
+- Back up an existing localization outside `localization` before installation
+- Keep API keys, model files, and machine-specific paths out of the repository
 
-- Python 3.10以降
-- OpenAI互換Chat Completions APIを提供するローカルLLMサーバー
-- 翻訳対象MODの展開済みフォルダ
+## Requirements
 
-既定の接続先はLM Studioの`http://127.0.0.1:1234/v1/chat/completions`です。モデル本体はこのリポジトリに含まれません。
+- Python 3.10 or later
+- A local LLM server exposing an OpenAI-compatible Chat Completions API
+- An extracted CK3 mod folder containing `localization/english`
 
-## スキルの導入
+The default endpoint is LM Studio's `http://127.0.0.1:1234/v1/chat/completions`. No model weights are included in this repository.
 
-Codexでは、このリポジトリ全体を次へ配置します。
+## Recommended local LLM
+
+For large CK3 mods containing adult content, the model used successfully in the original production translation is recommended:
+
+```text
+qwen3.6-35b-a3b-uncensored-hauhaucs-aggressive
+```
+
+The tested GGUF quantization was:
+
+```text
+Qwen3.6-35B-A3B-Uncensored-HauhauCS-Aggressive-Q4_K_M.gguf
+```
+
+In LM Studio this model translated explicit/NSFW event prose without frequent refusals or omissions. It was also used as the final fallback for long entries and difficult CK3 token structures while translating 9,389 entries from Carnalitas, CBO Unofficial, and Phaze Futanari.
+
+The tested setup used a 32,768-token context, four parallel slots, and full GPU offload. LM Studio reported an approximately 22 GB loaded size. Reduce context length, parallelism, or GPU offload when using hardware with less memory. The model itself is not distributed by this repository.
+
+## Install as a skill
+
+For Codex, copy the repository to:
 
 ```text
 ~/.codex/skills/translate-ck3-mods/
 ```
 
-Claude Codeでは次へ配置します。
+For Claude Code, copy it to:
 
 ```text
 ~/.claude/skills/translate-ck3-mods/
 ```
 
-Windows PowerShellでの例：
+Windows PowerShell example:
 
 ```powershell
 git clone https://github.com/Rimcat-JA/translate-ck3-mods.git "$HOME\translate-ck3-mods"
 Copy-Item "$HOME\translate-ck3-mods" "$HOME\.codex\skills\translate-ck3-mods" -Recurse
-# Claude Codeの場合：
+# For Claude Code:
 Copy-Item "$HOME\translate-ck3-mods" "$HOME\.claude\skills\translate-ck3-mods" -Recurse
 ```
 
-導入後、エージェントを再起動し、次のように呼び出します。
+Restart the agent after installation, then invoke the skill with a request such as:
 
 ```text
-$translate-ck3-mods を使い、このCK3 MODをLM Studioのモデルで日本語化して導入してください。
+Use $translate-ck3-mods to translate this CK3 mod into Japanese with my local LM Studio model and install it.
 ```
 
-## CLIの使用例
+## CLI usage
 
-### 翻訳
+### Translate
 
-翻訳は必ずゲームのMODフォルダとは別の作業先へ生成してください。
+Always stage output outside the live game mod directory.
 
 ```powershell
 python scripts/ck3_localize.py translate `
@@ -67,13 +87,13 @@ python scripts/ck3_localize.py translate `
   --language Japanese `
   --locale l_japanese `
   --endpoint http://127.0.0.1:1234/v1/chat/completions `
-  --model your-local-model-id `
+  --model qwen3.6-35b-a3b-uncensored-hauhaucs-aggressive `
   --workers 4
 ```
 
-複数MODを処理する場合は`--mod`を繰り返します。同じ`--cache`を使って再実行すると、検証済みの既訳を再利用します。
+Repeat `--mod` for additional mods. Rerun the same command with the same `--cache` path to reuse every validated translation already completed.
 
-翻訳語を統一したい場合は、UTF-8のJSON辞書を指定できます。
+To enforce terminology, provide a UTF-8 JSON glossary:
 
 ```json
 {
@@ -87,9 +107,9 @@ python scripts/ck3_localize.py translate `
 python scripts/ck3_localize.py translate ... --glossary "C:\work\glossary.json"
 ```
 
-### 検証
+### Validate
 
-モデルへ接続せず、生成済みファイルを再検証できます。
+Validate staged files without contacting the model:
 
 ```powershell
 python scripts/ck3_localize.py validate `
@@ -99,9 +119,9 @@ python scripts/ck3_localize.py validate `
   --locale l_japanese
 ```
 
-### 導入
+### Install
 
-検証に合格してから実行してください。
+Run this only after validation passes:
 
 ```powershell
 python scripts/ck3_localize.py install `
@@ -109,28 +129,30 @@ python scripts/ck3_localize.py install `
   --locale l_japanese
 ```
 
-既存の翻訳は次のように、CK3の読み込み対象外へ移動されます。
+Existing localization is moved outside CK3's localization loading tree:
 
 ```text
 <mod>/_translation_backups/japanese_<timestamp>/
 ```
 
-## 問題が起きた場合
+## Troubleshooting
 
-- トークン保持に失敗する場合は`--batch-items`と`--long-segment`を小さくします。
-- ローカルモデルの同時処理数に合わせて`--workers`を調整します。
-- モデルがJSON Schemaを受け付けない場合、スクリプトは通常のJSON出力へ自動的にフォールバックします。
-- 未完項目が残っても成功済み翻訳はSQLiteに保存されています。同じコマンドを再実行してください。
-- バックアップを`localization`配下へ置かないでください。CK3が旧訳も読み込む可能性があります。
+- Reduce `--batch-items` and `--long-segment` when the model fails to preserve tokens.
+- Match `--workers` to the local server's configured parallel limit.
+- When a server rejects JSON Schema, the script automatically falls back to ordinary JSON output.
+- Successful entries remain in SQLite even when some entries fail. Rerun the same command after adjusting settings.
+- Never place backups beneath `localization`; CK3 may load the old keys as duplicates.
 
-詳しい手順は[SKILL.md](SKILL.md)、CK3固有の検証規則は[references/ck3-localization.md](references/ck3-localization.md)を参照してください。
+See [SKILL.md](SKILL.md) for the agent workflow and [references/ck3-localization.md](references/ck3-localization.md) for CK3-specific validation rules.
 
 ## Repository layout
 
 ```text
-SKILL.md                         エージェント用ワークフロー
-agents/openai.yaml              Codex用UIメタデータ
-scripts/ck3_localize.py         翻訳・検証・導入CLI
-references/ck3-localization.md  CK3ローカライズ仕様
-references/agent-compatibility.md Codex／Claude Code導入情報
+README.md                         English documentation
+README.ja.md                      Japanese documentation
+SKILL.md                          Agent workflow
+agents/openai.yaml                Codex UI metadata
+scripts/ck3_localize.py           Translation, validation, and installation CLI
+references/ck3-localization.md    CK3 localization rules
+references/agent-compatibility.md Codex and Claude Code installation notes
 ```
