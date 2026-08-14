@@ -1,0 +1,47 @@
+CK3 MOD 日本語化メーカー v1.0.0
+================================
+
+【すぐ使う】
+
+1. CK3_Japanese_Mod_Maker.exe を起動します。
+2. 「フォルダを選択…」で、日本語化したいMODのフォルダを選びます。
+3. 「日本語化MODを作成」を押します。
+
+既定では、次のCK3ローカルMODフォルダに日本語化済みの完全コピーを作成します。
+
+  Documents\Paradox Interactive\Crusader Kings III\mod
+
+CK3ランチャーでは「（日本語化）」と付いた生成版を有効にし、同じ元MODは同時に有効化しないでください。
+
+【翻訳方式】
+
+- ローカルLLM（既定）
+  LM Studioでモデルを読み込み、Local Serverを開始してください。
+  英文はPC外へ送信されず、API料金も発生しません。
+
+- OpenAI / OpenRouter / NanoGPT
+  画面の「翻訳方式」で選択し、APIキーとモデルを設定します。
+  MODの英文が選択サービスへ送られ、サービスによって料金が発生します。
+  APIキーの保存を有効にすると、平文ファイルではなくWindows資格情報マネージャーへ暗号化保存します。
+
+【安全性】
+
+- 元MODは一切変更しません。
+- 翻訳と検証に成功してから完全コピーを生成します。
+- 作り直す場合、既存の生成版は _ck3_japanese_backups へ退避します。
+- APIキーや翻訳本文を設定ファイル／ログ／manifestへ記録しません。
+- 設定と進捗ログは %LOCALAPPDATA%\CK3JapaneseModMaker のPC内だけに保存します。
+- APIキーは選択したサービスの公式HTTPSエンドポイント以外へ送信できません。
+
+【困った場合】
+
+- 「未接続」: LM StudioのLocal Server、ポート1234、またはAPIキーを確認してください。
+- 「localization/englishがない」: MODの一番外側、または展開済みフォルダを選び直してください。
+- 大型MOD: 数千項目ある場合は長時間かかります。途中終了しても既訳はキャッシュされます。
+- Windowsの警告: 配布元とSHA256を確認し、信頼できる場所から入手したファイルだけを実行してください。
+
+ログ保存先:
+  %LOCALAPPDATA%\CK3JapaneseModMaker\logs
+
+翻訳キャッシュ:
+  %LOCALAPPDATA%\CK3JapaneseModMaker\cache

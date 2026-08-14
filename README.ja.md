@@ -2,13 +2,17 @@
 
 [English](README.md) | **日本語**
 
-ローカルLLMを使ってCrusader Kings III（CK3）のMODを任意の言語へ翻訳する、Codex／Claude Code互換スキルです。
+フォルダを選ぶだけでCrusader Kings III（CK3）MODの完全な日本語化コピーを作るWindowsアプリ兼、Codex／Claude Code互換スキルです。
 
-LM Studio、Ollama、llama.cpp、vLLMなどのOpenAI互換APIを利用し、翻訳結果をSQLiteへ逐次保存します。長いMODでも中断・再開でき、既に翻訳した文章を再利用できます。
+既定ではLM StudioなどのローカルLLMを利用します。高品質な翻訳が必要な場合はOpenAI、OpenRouter、NanoGPT（従量課金／サブスクリプション）もGUIから明示的に選択できます。翻訳結果はSQLiteへ逐次保存され、長いMODでも中断・再開できます。
 
 ## 主な機能
 
 - 複数のCK3 MODを一括翻訳
+- Windows用GUI：MODフォルダを選択してボタンを押すだけ
+- 元MOD全体をCK3ローカルMODフォルダへ複製し、英語ローカライズを検証済み日本語へ置換
+- ローカルLLM／OpenAI／OpenRouter／NanoGPTを画面で選択
+- 翻訳結果を単一の独立CK3 MOD、ランチャー用descriptor、manifest、再現可能なZIPへ自動統合
 - 日本語を含む任意の翻訳先言語と`l_<locale>`ヘッダーに対応
 - `$VALUE$`、`[Character.GetName]`、`#EMP`、`#!`、`@icon!`などのCK3構文を保護
 - 長文の安全な分割と失敗項目のみの再試行
@@ -16,13 +20,43 @@ LM Studio、Ollama、llama.cpp、vLLMなどのOpenAI互換APIを利用し、翻�
 - 成人向け／NSFW文章を省略・検閲しない翻訳指示
 - UTF-8 BOM、ファイル数、キー、トークン、物理改行、文字化けの検証
 - 既存翻訳を`localization`外へ退避してから安全に導入
-- APIキー、モデル、PC固有パスをリポジトリへ保存しない設計
+- APIキーをWindows資格情報マネージャーへ暗号化保存し、設定JSON・ログ・manifestには保存しない設計
+- リモートAPIキーを公式HTTPSエンドポイント以外へ送信できない許可リスト
+- LLMには翻訳本文だけを担当させ、コピー・検証・descriptor・バックアップ等は通常のPythonで処理
+
+## EXEですぐ使う
+
+[GitHub Releases](https://github.com/Rimcat-JA/translate-ck3-mods/releases/latest)から配布ZIPをダウンロードし、`CK3_Japanese_Mod_Maker.exe`を起動します。Pythonやコマンド操作は不要です。
+
+1. ローカルLLMを使う場合は、LM Studioでモデルを読み込みLocal Serverを開始します。
+2. アプリで翻訳方式を選びます。既定は「ローカルLLM」です。
+3. 「フォルダを選択…」で展開済みのCK3 MODを指定します。
+4. 「日本語化MODを作成」を押します。
+
+生成物は既定で次へ配置され、CK3ランチャーからすぐ選択できます。
+
+```text
+Documents\Paradox Interactive\Crusader Kings III\mod\<元MOD名>_Japanese
+Documents\Paradox Interactive\Crusader Kings III\mod\<元MOD名>_Japanese.mod
+```
+
+元MODは変更されません。生成版では`localization/english`を取り除き、検証済みの`localization/japanese`へ置換します。スクリプト、衣装、画像、音声など、それ以外のファイルはハッシュ比較により完全コピーを確認します。ランチャーでは生成版だけを有効にし、同じ元MODを同時に有効化しないでください。
+
+### API方式と保存場所
+
+- ローカルLLM：英文をPC外へ送信せず、API料金も発生しません。
+- OpenAI／OpenRouter／NanoGPT：英文を選択サービスの公式APIへ送信し、料金が発生する場合があります。開始前に確認画面を表示します。
+- APIキー：保存を有効にした場合、Windows資格情報マネージャーへ暗号化保存します。
+- 設定・ログ・キャッシュ：`%LOCALAPPDATA%\CK3JapaneseModMaker`だけに保存し、自動アップロードしません。
+- ログにはAPIキーと翻訳本文を記録しません。
 
 ## 必要なもの
 
-- Python 3.10以降
-- OpenAI互換Chat Completions APIを提供するローカルLLMサーバー
+- Windows 10／11（配布EXEを使う場合）
 - 翻訳対象MODの展開済みフォルダ
+- ローカルLLMサーバー、または選択したAPIサービスのキー
+
+ソースから実行・ビルドする場合だけPython 3.10以降が必要です。
 
 既定の接続先はLM Studioの`http://127.0.0.1:1234/v1/chat/completions`です。モデル本体はこのリポジトリに含まれません。
 
@@ -40,19 +74,19 @@ qwen3.6-35b-a3b-uncensored-hauhaucs-aggressive
 Qwen3.6-35B-A3B-Uncensored-HauhauCS-Aggressive-Q4_K_M.gguf
 ```
 
-このモデルはLM Studio上で、成人向け／NSFW文章を拒否・省略しにくく、長いイベント文章も自然な日本語へ翻訳できました。実際にCarnalitas、CBO Unofficial、Phaze Futanariの合計9,389項目を翻訳する際、外部APIで失敗した長文や複雑なCK3トークンを含む文章の最終処理にも使用しています。
+このモデルはLM Studio上で、成人向け／NSFW文章を拒否・省略しにくく、長いイベント文章も自然な日本語へ翻訳できました。実際にCarnalitas、CBO Unofficial、Phaze Futanariの合計9,389項目に含まれる長文や複雑なCK3トークンの翻訳にも使用しています。
 
 今回の動作設定は、コンテキスト長32,768、並列数4、フルGPUオフロードです。LM Studio上の読み込みサイズは約22GBだったため、利用環境に応じてコンテキスト長、並列数、GPUオフロードを下げてください。モデルは本リポジトリには同梱されません。
 
 ## スキルの導入
 
-Codexでは、このリポジトリ全体を次へ配置します。
+Codexでは、`SKILL.md`、`agents`、`scripts`、`references`を次へ配置します。
 
 ```text
 ~/.codex/skills/translate-ck3-mods/
 ```
 
-Claude Codeでは次へ配置します。
+Claude Codeでも同じ構成を次へ配置します（`agents`は省略可能です）。
 
 ```text
 ~/.claude/skills/translate-ck3-mods/
@@ -62,9 +96,11 @@ Windows PowerShellでの例：
 
 ```powershell
 git clone https://github.com/Rimcat-JA/translate-ck3-mods.git "$HOME\translate-ck3-mods"
-Copy-Item "$HOME\translate-ck3-mods" "$HOME\.codex\skills\translate-ck3-mods" -Recurse
-# Claude Codeの場合：
-Copy-Item "$HOME\translate-ck3-mods" "$HOME\.claude\skills\translate-ck3-mods" -Recurse
+$source = "$HOME\translate-ck3-mods"
+$target = "$HOME\.codex\skills\translate-ck3-mods" # Claude Code: $HOME\.claude\skills\translate-ck3-mods
+New-Item -ItemType Directory -Force -Path $target | Out-Null
+Copy-Item "$source\SKILL.md" -Destination $target -Force
+Copy-Item "$source\agents","$source\scripts","$source\references" -Destination $target -Recurse -Force
 ```
 
 導入後、エージェントを再起動し、次のように呼び出します。
@@ -73,7 +109,45 @@ Copy-Item "$HOME\translate-ck3-mods" "$HOME\.claude\skills\translate-ck3-mods" -
 $translate-ck3-mods を使い、このCK3 MODをLM Studioのモデルで日本語化して導入してください。
 ```
 
+## ソースからEXEをビルド
+
+PyInstallerとPillowを導入したWindows環境で次を実行します。
+
+```powershell
+.\build_exe.ps1
+```
+
+`dist/CK3_Japanese_Mod_Maker.exe`、SHA256ファイル、説明書入り配布ZIPが生成されます。
+
 ## CLIの使用例
+
+### 1つのMODを完全コピーして日本語化
+
+```powershell
+python scripts/ck3_clone.py "C:\path\to\Example Mod"
+```
+
+ローカルモデルは自動検出され、出力先もCK3ローカルMODフォルダへ自動設定されます。
+
+### 翻訳から単一MOD作成まで一括実行
+
+[references/pipeline.example.json](references/pipeline.example.json)をコピーして内容を編集し、次を実行します。
+
+```powershell
+python scripts/ck3_pipeline.py --config "C:\work\ck3-pipeline.json"
+```
+
+設定された全MODをローカルLLMで翻訳し、検証後、次を自動生成します。
+
+```text
+<destination>/<bundle-id>/              単一の独立CK3 MOD
+<destination>/<bundle-id>.mod           ランチャー用descriptor
+<destination>/<bundle-id>.zip           再現可能な配布用ZIP
+```
+
+manifestには、PC固有の元パスを含めず、入力ファイルのハッシュ、項目数、競合、依存MOD、出力ハッシュを記録します。異なる訳文を持つ重複キーが見つかった場合は、既定で停止します。既存成果物も黙って削除せず、`"overwrite": true`の場合は先に`_bundle_backups`へ退避します。
+
+この複数MOD用設定パイプラインは安全なローカルLLM専用です。GUI／`ck3_clone.py`では、ユーザーが明示的に選択した場合だけ公式リモートAPIを利用できます。どの方式でもLLMを呼ぶのは翻訳本文の生成だけです。
 
 ### 翻訳
 
@@ -153,6 +227,16 @@ README.ja.md                    日本語ドキュメント
 SKILL.md                         エージェント用ワークフロー
 agents/openai.yaml              Codex用UIメタデータ
 scripts/ck3_localize.py         翻訳・検証・導入CLI
+scripts/ck3_clone.py            完全コピー型の単一MOD日本語化エンジン
+scripts/ck3_gui.py              Windows GUIエントリーポイント
+scripts/ck3_providers.py        APIプロバイダー許可リスト
+scripts/windows_credentials.py  Windows資格情報マネージャー連携
+scripts/ck3_pipeline.py         ローカル翻訳からパッケージ化までの一括処理
+scripts/ck3_bundle.py           LLMを使わない決定論的な単一MODビルダー
+build_exe.ps1                   単体Windows EXE・配布ZIPビルド
+packaging/                      バージョン情報・配布説明書
+tests/                          ローカル／全API／凍結EXEのE2Eテスト
+references/pipeline.example.json 一括処理の設定例
 references/ck3-localization.md  CK3ローカライズ仕様
 references/agent-compatibility.md Codex／Claude Code導入情報
 ```
