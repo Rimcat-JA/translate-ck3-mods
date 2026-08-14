@@ -1,0 +1,28 @@
+{
+  "translation": {
+    "mods": [
+      {
+        "name": "Example Mod",
+        "path": "C:\\path\\to\\Example Mod"
+      }
+    ],
+    "staging_output": "C:\\work\\ck3-ja-staging",
+    "cache": "C:\\work\\ck3-ja.sqlite",
+    "language": "Japanese",
+    "locale": "l_japanese",
+    "endpoint": "http://127.0.0.1:1234/v1/chat/completions",
+    "model": "your-local-model-id",
+    "workers": 4
+  },
+  "bundle": {
+    "destination": "C:\\Users\\me\\Documents\\Paradox Interactive\\Crusader Kings III\\mod",
+    "id": "my-ck3-japanese-pack",
+    "name": "My CK3 Japanese Pack",
+    "version": "1.0.0",
+    "supported_version": "1.18.*",
+    "collision_policy": "error",
+    "source_dependencies": true,
+    "zip": true,
+    "overwrite": false
+  }
+}

@@ -5,3 +5,6 @@ __pycache__/
 *.sqlite-shm
 *.db
 .env
+build/
+dist/
+packaging/app-preview.png

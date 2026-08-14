@@ -38,3 +38,13 @@ Mask protected syntax before asking a model to translate. Reject output when pla
 5. Validate the installed files against the English source.
 
 Keep backups outside `localization` to prevent duplicate keys.
+
+## Standalone bundle rules
+
+- The local LLM translates values only. Use deterministic code for file discovery, merging, conflicts, descriptors, manifests, ZIPs, and backups.
+- Default to a loopback endpoint. A hosted provider is allowed only after explicit user selection, and remote keys may be sent only to the exact official HTTPS endpoints in `scripts/ck3_providers.py`.
+- Deduplicate identical repeated keys. Stop on different values for the same key unless the user has explicitly selected a reviewed first/last policy.
+- Emit one consolidated locale file per source mod with stable ordering, one `descriptor.mod` inside the mod, and one launcher `.mod` beside it.
+- Record relative source filenames, SHA-256 hashes, counts, collision decisions, and output hashes in a manifest. Do not record API keys or absolute machine paths.
+- Sort ZIP entries and use fixed timestamps so identical input produces identical archives.
+- Never silently replace an existing bundle. Move every existing artifact to `_bundle_backups` before an authorized overwrite.

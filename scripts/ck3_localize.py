@@ -18,6 +18,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+from ck3_providers import PROVIDERS, get_provider, validate_endpoint
 
 ENTRY_RE = re.compile(r'^(\s*([^#\s][^:]*):\d*\s+")(.*)("\s*(?:#.*)?)$')
 BROKEN_RE = re.compile(r'^(\s*([^#\s][^:]*):\d*\s+")(.*)$')
@@ -32,6 +33,10 @@ SIMPLIFIED_ONLY_RE = re.compile(
     "\u7535\u7231\u4eb2\u8bb8\u5904\u5b9e\u8ba4\u89c9\u73b0\u538b\u51fb\u79bb\u4e1c"
     "\u4e66\u8f66\u9a6c\u6218\u7ebf\u603b\u4e49\u6c14]"
 )
+
+
+class TranslationCancelled(RuntimeError):
+    """Stop retries immediately when the caller requests cancellation."""
 
 
 @dataclasses.dataclass(frozen=True)
@@ -60,9 +65,14 @@ class Translator:
     def __init__(self, args: argparse.Namespace, records: list[Record]) -> None:
         self.args = args
         self.records = records
-        self.api_key = os.environ.get(args.api_key_env) if args.api_key_env else None
+        self.provider_id = getattr(args, "provider", "local")
+        self.provider = get_provider(self.provider_id)
+        validate_endpoint(self.provider_id, args.endpoint)
+        self.api_key = getattr(args, "api_key", None) or (os.environ.get(args.api_key_env) if args.api_key_env else None)
         if args.api_key_env and not self.api_key:
             raise RuntimeError(f"Environment variable is not set: {args.api_key_env}")
+        if self.provider.requires_key and not self.api_key:
+            raise RuntimeError(f"{self.provider.label} requires an API key")
         self.glossary = load_glossary(args.glossary)
         self.extra = Path(args.extra_instructions).read_text(encoding="utf-8") if args.extra_instructions else ""
         self.request_lock = threading.Lock()
@@ -107,6 +117,7 @@ Return valid JSON only with one translation for every supplied id. Do not think 
             "additionalProperties": False,
         }
         source_chars = sum(len(value) for value in items.values())
+        token_limit = min(self.args.max_tokens, max(2000, int(source_chars * 1.8) + 1000))
         payload = {
             "model": self.args.model,
             "messages": [
@@ -114,12 +125,13 @@ Return valid JSON only with one translation for every supplied id. Do not think 
                 {"role": "user", "content": json.dumps({"items": items}, ensure_ascii=False)},
             ],
             "temperature": self.args.temperature,
-            "max_tokens": min(self.args.max_tokens, max(2000, int(source_chars * 1.8) + 1000)),
             "reasoning_effort": "none",
             "response_format": {"type": "json_schema", "json_schema": {"name": "ck3_translation", "strict": True, "schema": schema}},
         }
+        payload["max_completion_tokens" if self.provider_id == "openai" else "max_tokens"] = token_limit
         last_error: Exception | None = None
         for attempt in range(self.args.retries):
+            self.check_cancelled()
             request_payload = dict(payload)
             if attempt > 0 and isinstance(last_error, urllib.error.HTTPError) and last_error.code in {400, 404, 422}:
                 request_payload.pop("response_format", None)
@@ -128,11 +140,14 @@ Return valid JSON only with one translation for every supplied id. Do not think 
             headers = {"Content-Type": "application/json"}
             if self.api_key:
                 headers["Authorization"] = f"Bearer {self.api_key}"
+            if self.provider_id == "openrouter":
+                headers["X-OpenRouter-Title"] = "CK3 Japanese Mod Maker"
             request = urllib.request.Request(self.args.endpoint, data=data, headers=headers, method="POST")
             try:
                 self.throttle()
                 with urllib.request.urlopen(request, timeout=self.args.timeout) as response:
                     response_data = json.loads(response.read().decode("utf-8"))
+                self.check_cancelled()
                 content = response_data["choices"][0]["message"].get("content")
                 if not content:
                     raise ValueError("Model returned empty content")
@@ -143,8 +158,16 @@ Return valid JSON only with one translation for every supplied id. Do not think 
                 return {item_id: str(translated[item_id]) for item_id in items}
             except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError, urllib.error.URLError, urllib.error.HTTPError) as exc:
                 last_error = exc
+                if isinstance(exc, urllib.error.HTTPError) and exc.code in {401, 402, 403}:
+                    meaning = {401: "API key was rejected", 402: "insufficient API credits", 403: "request was forbidden"}[exc.code]
+                    raise RuntimeError(f"{self.provider.label}: {meaning} (HTTP {exc.code})") from exc
                 time.sleep(min(8.0, 0.75 * (2**attempt)))
-        raise RuntimeError(f"Local model request failed: {last_error}")
+        raise RuntimeError(f"Translation provider request failed: {last_error}")
+
+    def check_cancelled(self) -> None:
+        cancel_event = getattr(self.args, "cancel_event", None)
+        if cancel_event is not None and cancel_event.is_set():
+            raise TranslationCancelled("Translation cancelled")
 
     def translate_once(self, batch: list[Record]) -> tuple[dict[str, str], list[Record]]:
         masked: dict[str, str] = {}
@@ -172,7 +195,9 @@ Return valid JSON only with one translation for every supplied id. Do not think 
             if len(record.source) > self.args.long_threshold:
                 try:
                     return {record.item_id: self.translate_long(record)}, {}
-                except Exception as exc:
+                except TranslationCancelled:
+                    raise
+                except Exception as exc:  # noqa: BLE001 - isolate an arbitrary provider/model failure to this record
                     return {}, {record.item_id: str(exc)}
             last_error = "validation failed"
             for _attempt in range(self.args.retries):
@@ -181,12 +206,16 @@ Return valid JSON only with one translation for every supplied id. Do not think 
                     if not invalid:
                         return valid, {}
                     last_error = "model output failed validation"
-                except Exception as exc:
+                except TranslationCancelled:
+                    raise
+                except Exception as exc:  # noqa: BLE001 - retry arbitrary provider/model failures per record
                     last_error = str(exc)
             return {}, {record.item_id: last_error}
         try:
             valid, invalid = self.translate_once(batch)
-        except Exception:
+        except TranslationCancelled:
+            raise
+        except Exception:  # noqa: BLE001 - recursively isolate a failing provider/model response
             midpoint = len(batch) // 2
             left, left_fail = self.translate_resilient(batch[:midpoint])
             right, right_fail = self.translate_resilient(batch[midpoint:])
@@ -217,7 +246,9 @@ Return valid JSON only with one translation for every supplied id. Do not think 
                         output.append(leading + result + trailing)
                         break
                     last_error = "placeholder mismatch"
-                except Exception as exc:
+                except TranslationCancelled:
+                    raise
+                except Exception as exc:  # noqa: BLE001 - retry arbitrary provider/model failures per segment
                     last_error = str(exc)
             else:
                 raise RuntimeError(f"segment {index + 1}/{len(chunks)}: {last_error}")
@@ -233,6 +264,9 @@ def parse_mod(value: str) -> ModSpec:
     else:
         raw_path = value
         name = Path(raw_path).name
+    name = name.strip()
+    if not name or name in {".", ".."} or any(character in name for character in ("/", "\\", "=")):
+        raise ValueError(f"Unsafe mod name: {name!r}")
     root = Path(raw_path).expanduser().resolve()
     if not root.is_dir():
         raise FileNotFoundError(root)
@@ -248,11 +282,17 @@ def parse_mod(value: str) -> ModSpec:
             raise RuntimeError(f"Expected one localization/english tree beneath {root}, found {len(candidates)}")
         english = candidates[0]
         root = english.parent.parent
-    return ModSpec(name=name.strip() or root.name, root=root, english_root=english)
+    return ModSpec(name=name, root=root, english_root=english)
+
+
+def require_loopback_endpoint(endpoint: str) -> None:
+    validate_endpoint("local", endpoint)
 
 
 def locale_id(locale: str) -> str:
-    return locale[2:] if locale.startswith("l_") else locale
+    if not re.fullmatch(r"l_[a-z0-9_]+", locale):
+        raise ValueError(f"Invalid CK3 locale: {locale}")
+    return locale[2:]
 
 
 def parse_model_json(content: str) -> dict[str, str]:
@@ -346,11 +386,13 @@ def valid_translation(source: str, translated: str, language: str) -> bool:
     script = target_script(language)
     if script and ascii_letters >= 3 and not script.search(prose_target):
         return False
+    copied_source = re.sub(r"\s+", " ", prose_source).strip().casefold()
+    copied_target = re.sub(r"\s+", " ", prose_target).strip().casefold()
+    if ascii_letters >= 12 and len(copied_source) >= 12 and copied_source in copied_target:
+        return False
     if ("japan" in language.lower() or "\u65e5\u672c" in language.lower()) and SIMPLIFIED_ONLY_RE.search(prose_target):
         return False
-    if ascii_letters >= 6 and prose_source.strip() == prose_target.strip() and "english" not in language.lower():
-        return False
-    return True
+    return not (ascii_letters >= 6 and prose_source.strip() == prose_target.strip() and "english" not in language.lower())
 
 
 def split_long(text: str, limit: int) -> list[str]:
@@ -377,12 +419,12 @@ def load_glossary(path: str | None) -> dict[str, str]:
     return data
 
 
-def make_cache_key(record: Record, model: str, language: str, locale: str) -> str:
-    payload = "\0".join((model, language, locale, record.mod, record.relative_file, record.key, record.source))
+def make_cache_key(record: Record, model: str, language: str, locale: str, provider: str = "local") -> str:
+    payload = f"{provider}\0{model}\0{language}\0{locale}\0{record.mod}\0{record.relative_file}\0{record.key}\0{record.source}"
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
-def collect_records(mods: list[ModSpec], output: Path, locale: str, model: str, language: str) -> tuple[list[Record], dict[Path, list[str]]]:
+def collect_records(mods: list[ModSpec], output: Path, locale: str, model: str, language: str, provider: str = "local") -> tuple[list[Record], dict[Path, list[str]]]:
     records: list[Record] = []
     destinations: dict[Path, list[str]] = {}
     serial = 0
@@ -417,7 +459,7 @@ def collect_records(mods: list[ModSpec], output: Path, locale: str, model: str, 
                     destination=destination, output_lines=output_lines, output_index=line_index + offset,
                     prefix=match.group(1), suffix='"' if broken else match.group(4),
                 )
-                record.cache_key = make_cache_key(record, model, language, locale)
+                record.cache_key = make_cache_key(record, model, language, locale, provider)
                 records.append(record)
                 serial += 1
     return records, destinations
@@ -532,11 +574,12 @@ def validate_staged(mods: list[ModSpec], output: Path, language: str, locale: st
     return files, entries_count
 
 
-def command_translate(args: argparse.Namespace) -> None:
-    mods = [parse_mod(value) for value in args.mod]
-    output = Path(args.output).expanduser().resolve()
-    records, destinations = collect_records(mods, output, args.locale, args.model, args.language)
-    connection = connect_cache(Path(args.cache).expanduser().resolve())
+def translate_records(
+    args: argparse.Namespace,
+    records: list[Record],
+    destinations: dict[Path, list[str]],
+    connection: sqlite3.Connection,
+) -> None:
     translated: dict[str, str] = {}
     pending: list[Record] = []
     for record in records:
@@ -550,9 +593,12 @@ def command_translate(args: argparse.Namespace) -> None:
     translator = Translator(args, records)
     completed = 0
     failures: dict[str, str] = {}
-    with concurrent.futures.ThreadPoolExecutor(max_workers=args.workers) as executor:
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=args.workers)
+    completed_normally = False
+    try:
         future_map = {executor.submit(translator.translate_resilient, batch): batch for batch in batches}
         for future in concurrent.futures.as_completed(future_map):
+            translator.check_cancelled()
             result, failed = future.result()
             now = int(time.time())
             for record in future_map[future]:
@@ -579,18 +625,38 @@ def command_translate(args: argparse.Namespace) -> None:
             completed += 1
             if completed % 10 == 0 or completed == len(batches):
                 print(json.dumps({"completed_batches": completed, "total_batches": len(batches), "translated": len(translated), "failures": len(failures)}))
+        completed_normally = True
+    finally:
+        if not completed_normally:
+            for future in locals().get("future_map", {}):
+                future.cancel()
+        executor.shutdown(wait=True, cancel_futures=not completed_normally)
     missing = [record for record in records if record.item_id not in translated]
     if missing:
         print(f"Translation incomplete: {len(missing)} entries remain. Rerun with the same cache after adjusting batch/segment settings.", file=sys.stderr)
         for record in missing[:30]:
             print(f"MISSING {record.item_id} {record.mod}:{record.relative_file}:{record.key}", file=sys.stderr)
+            if record.item_id in failures:
+                print(f"REASON {record.item_id}: {failures[record.item_id]}", file=sys.stderr)
         raise SystemExit(2)
     for record in records:
         record.output_lines[record.output_index] = f"{record.prefix}{escape_quotes(translated[record.item_id])}{record.suffix}"
     for destination, lines in destinations.items():
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_text("\n".join(lines) + "\n", encoding="utf-8-sig")
-    connection.close()
+
+
+def command_translate(args: argparse.Namespace) -> None:
+    mods = [parse_mod(value) for value in args.mod]
+    output = Path(args.output).expanduser().resolve()
+    records, destinations = collect_records(
+        mods, output, args.locale, args.model, args.language, getattr(args, "provider", "local")
+    )
+    connection = connect_cache(Path(args.cache).expanduser().resolve())
+    try:
+        translate_records(args, records, destinations, connection)
+    finally:
+        connection.close()
     validate_staged(mods, output, args.language, args.locale)
     print(f"Wrote {len(destinations)} files to {output}")
 
@@ -648,12 +714,13 @@ def add_source_args(parser: argparse.ArgumentParser) -> None:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Translate and safely install CK3 mod localization with a local LLM")
+    parser = argparse.ArgumentParser(description="Translate and safely install CK3 mod localization with a local or explicitly selected API provider")
     subparsers = parser.add_subparsers(dest="command", required=True)
     translate = subparsers.add_parser("translate", help="translate to a staged output tree and validate it")
     add_source_args(translate)
     translate.add_argument("--cache", required=True, help="SQLite translation-memory path")
-    translate.add_argument("--endpoint", default="http://127.0.0.1:1234/v1/chat/completions")
+    translate.add_argument("--endpoint", help="provider chat-completions endpoint; uses the selected provider default when omitted")
+    translate.add_argument("--provider", choices=tuple(PROVIDERS), default="local")
     translate.add_argument("--model", required=True, help="model id returned by the local server")
     translate.add_argument("--api-key-env", help="optional environment variable containing a bearer token")
     translate.add_argument("--glossary", help="UTF-8 JSON source-to-target glossary")
@@ -683,6 +750,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     args = build_parser().parse_args()
+    if args.command == "translate" and not args.endpoint:
+        args.endpoint = get_provider(args.provider).chat_endpoint
     args.func(args)
 
 
