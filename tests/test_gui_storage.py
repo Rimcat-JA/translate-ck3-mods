@@ -46,7 +46,7 @@ class GuiStorageTests(unittest.TestCase):
                 self.assertNotIn("api_key", settings)
                 stored = b"".join(path.read_bytes() for path in root.rglob("*") if path.is_file())
                 self.assertNotIn(secret.encode("utf-8"), stored)
-                self.assertIn("[APIキー非表示]", app.log_path.read_text(encoding="utf-8"))
+                self.assertIn("[API KEY HIDDEN]", app.log_path.read_text(encoding="utf-8"))
         finally:
             window.destroy()
 

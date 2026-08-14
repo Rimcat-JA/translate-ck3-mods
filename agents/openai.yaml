@@ -1,4 +1,4 @@
 interface:
   display_name: "Translate CK3 Mods"
-  short_description: "Create a validated Japanese clone of a CK3 mod"
-  default_prompt: "Use $translate-ck3-mods to create a complete Japanese clone of this CK3 mod, using my selected local or API translation provider only for translation text."
+  short_description: "Detect and translate CK3 mod localization safely"
+  default_prompt: "Use $translate-ck3-mods to scan my CK3 mods, detect their actual localization language, and create validated translations in my selected target language. Use my selected local or API provider only for translation text."

@@ -16,7 +16,7 @@ ROOT = Path(__file__).resolve().parents[1]
 PIPELINE = ROOT / "scripts" / "ck3_pipeline.py"
 BUNDLER = ROOT / "scripts" / "ck3_bundle.py"
 CLONER = ROOT / "scripts" / "ck3_clone.py"
-FROZEN_APP = ROOT / "dist" / "CK3_Japanese_Mod_Maker.exe"
+FROZEN_APP = ROOT / "dist" / "CK3_Mod_Translator.exe"
 
 
 class LocalTranslationHandler(BaseHTTPRequestHandler):
@@ -167,7 +167,7 @@ class PipelineTests(unittest.TestCase):
             "--endpoint", f"http://127.0.0.1:{self.server.server_port}/v1/chat/completions", ok=False,
         )
         self.assertNotEqual(failed.returncode, 0)
-        self.assertIn("英語ローカライズYMLがありません", failed.stderr)
+        self.assertIn("No source-localization YML files were found", failed.stderr)
 
         source = create_mod(self.root, "UnsafeOutput", [("safe_key", "Safe source")])
         unsafe = self.run_program(
@@ -175,7 +175,7 @@ class PipelineTests(unittest.TestCase):
             "--endpoint", f"http://127.0.0.1:{self.server.server_port}/v1/chat/completions", ok=False,
         )
         self.assertNotEqual(unsafe.returncode, 0)
-        self.assertIn("元MODフォルダの内部", unsafe.stderr)
+        self.assertIn("output cannot be inside the source mod folder", unsafe.stderr)
 
     def test_one_path_creates_complete_japanese_clone(self) -> None:
         source = create_mod(self.root, "FullMod", [("hello", "Hello [Character.GetName]"), ("description", "A complete English description.")])
@@ -207,17 +207,17 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual((output / "common" / "scripted_rules" / "rules.txt").read_bytes(), (source / "common" / "scripted_rules" / "rules.txt").read_bytes())
         self.assertEqual((output / "gfx" / "asset.bin").read_bytes(), (source / "gfx" / "asset.bin").read_bytes())
         descriptor_text = (output / "descriptor.mod").read_text(encoding="utf-8")
-        self.assertIn("日本語化", descriptor_text)
+        self.assertIn("(Japanese Translation)", descriptor_text)
         self.assertNotIn("remote_file_id", descriptor_text)
         launcher = output.parent / f"{output.name}.mod"
         self.assertIn(output.resolve().as_posix(), launcher.read_text(encoding="utf-8"))
-        manifest = json.loads((output / "japanese-clone-manifest.json").read_text(encoding="utf-8"))
+        manifest = json.loads((output / "translation-clone-manifest.json").read_text(encoding="utf-8"))
         self.assertEqual(manifest["translation_engine"], "local")
         self.assertNotIn(str(source), json.dumps(manifest))
 
         self.run_program(*command, "--overwrite")
         self.assertEqual(LocalTranslationHandler.calls, calls, "second clone should reuse all translated values")
-        self.assertTrue(any((self.root / "_ck3_japanese_backups").iterdir()))
+        self.assertTrue(any((self.root / "_ck3_translation_backups").iterdir()))
 
     @unittest.skipUnless(FROZEN_APP.is_file(), "frozen Windows application has not been built")
     def test_frozen_exe_runs_translation_and_clone_engine(self) -> None:

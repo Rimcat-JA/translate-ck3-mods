@@ -1,7 +1,7 @@
 VSVersionInfo(
   ffi=FixedFileInfo(
-    filevers=(1, 0, 0, 0),
-    prodvers=(1, 0, 0, 0),
+    filevers=(2, 0, 0, 0),
+    prodvers=(2, 0, 0, 0),
     mask=0x3f,
     flags=0x0,
     OS=0x40004,
@@ -12,19 +12,19 @@ VSVersionInfo(
   kids=[
     StringFileInfo([
       StringTable(
-        '041104B0',
+        '040904B0',
         [
           StringStruct('CompanyName', 'Rimcat-JA'),
-          StringStruct('FileDescription', 'CK3 MOD 日本語化メーカー'),
-          StringStruct('FileVersion', '1.0.0'),
-          StringStruct('InternalName', 'CK3_Japanese_Mod_Maker'),
+          StringStruct('FileDescription', 'CK3 Mod Translator'),
+          StringStruct('FileVersion', '2.0.0'),
+          StringStruct('InternalName', 'CK3_Mod_Translator'),
           StringStruct('LegalCopyright', 'Rimcat-JA'),
-          StringStruct('OriginalFilename', 'CK3_Japanese_Mod_Maker.exe'),
-          StringStruct('ProductName', 'CK3 MOD 日本語化メーカー'),
-          StringStruct('ProductVersion', '1.0.0')
+          StringStruct('OriginalFilename', 'CK3_Mod_Translator.exe'),
+          StringStruct('ProductName', 'CK3 Mod Translator'),
+          StringStruct('ProductVersion', '2.0.0')
         ]
       )
     ]),
-    VarFileInfo([VarStruct('Translation', [0x0411, 1200])])
+    VarFileInfo([VarStruct('Translation', [0x0409, 1200])])
   ]
 )

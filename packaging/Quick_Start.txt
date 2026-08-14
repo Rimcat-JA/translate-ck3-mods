@@ -1,0 +1,42 @@
+CK3 Mod Translator v2.0.0
+=========================
+
+QUICK START
+
+1. Launch CK3_Mod_Translator.exe.
+2. Choose a source and target language. Auto-detect is recommended for the source.
+3. Scan your CK3 mod folder, another mod library, an individual mod folder, or a .mod descriptor.
+4. Check the valid mods you want to translate and press Translate Selected Mods.
+
+The default destination is CK3's local mod folder:
+
+  Documents\Paradox Interactive\Crusader Kings III\mod
+
+The source mods are never modified. Enable each generated translation clone in the CK3 launcher instead of enabling it together with its source mod.
+
+LANGUAGE DETECTION
+
+- The app reads CK3 descriptors and localization YAML files before translation.
+- It displays the language actually used by the localization text, even when the file is stored under a misleading l_english header.
+- Mods already written in the target language are disabled to prevent accidental retranslation.
+- Low-confidence auto-detection is disabled until you explicitly choose and review a source language.
+- Script-only mods are shown as Non-linguistic and invalid mod structures cannot be selected.
+
+TRANSLATION PROVIDERS
+
+- Local LLM (default): Start the LM Studio Local Server after loading a model. Text stays on this PC and no API fee is charged.
+- OpenAI / OpenRouter / NanoGPT: Select the provider explicitly, enter an API key and model, and confirm before sending localization text. Charges may apply.
+
+Saved API keys are encrypted with Windows Credential Manager. Settings, logs, and translation caches remain under:
+
+  %LOCALAPPDATA%\CK3JapaneseModMaker
+
+The application never stores API keys or localization text in logs or manifests.
+
+TROUBLESHOOTING
+
+- No local connection: Check LM Studio Local Server and port 1234.
+- Invalid mod: Select the folder containing descriptor.mod, or select its external .mod descriptor.
+- Non-linguistic: The mod has no translatable localization text.
+- Large mods can take a long time. Validated entries are cached and reused after restarting.
+- Only run executables from a trusted source and verify the included SHA256 checksum.

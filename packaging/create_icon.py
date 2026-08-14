@@ -29,7 +29,7 @@ def main() -> None:
     draw.polygon([(44, 72), (69, 38), (95, 72), (128, 30), (161, 72), (188, 38), (214, 72), (203, 105), (55, 105)], fill="#d9b45b")
     draw.rounded_rectangle((52, 94, 204, 117), radius=7, fill="#f4df9d")
     font = load_font(92)
-    label = "JA"
+    label = "TR"
     box = draw.textbbox((0, 0), label, font=font, stroke_width=2)
     width = box[2] - box[0]
     draw.text(((256 - width) / 2, 115), label, font=font, fill="white", stroke_width=2, stroke_fill="#172231")

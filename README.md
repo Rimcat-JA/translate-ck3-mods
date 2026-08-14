@@ -2,15 +2,20 @@
 
 **English** | [日本語](README.ja.md)
 
-A Windows desktop application and Codex/Claude Code compatible skill that creates a complete Japanese copy of a Crusader Kings III mod by selecting one folder.
+A Windows desktop application and Codex/Claude Code compatible skill that scans Crusader Kings III mod libraries, detects the language actually used by each mod, and creates complete translated copies in a selected target language.
 
 Local LLM mode is the default. Users may explicitly select OpenAI, OpenRouter, or NanoGPT for higher-quality remote translation. Completed translations are stored incrementally in SQLite, so large projects can be interrupted and resumed.
 
 ## Features
 
 - Translate one or more CK3 mods in a single run
-- Native Windows GUI: select a mod folder and press one button
-- Copy the complete source mod into CK3's local mod directory and replace English localization with validated Japanese
+- English Windows GUI with independent source and target language selectors
+- Scan CK3's complete mod library or another parent folder, then choose individual mods from a checklist
+- Add individual mod folders or external `.mod` launcher descriptors
+- Resolve descriptor paths, validate CK3 mod structure, and disable invalid candidates
+- Detect English, Japanese, Russian, Chinese, Korean, and several Latin-script languages from actual localization text
+- Display script-only mods as **Non-linguistic** and disable mods already written in the target language
+- Copy the complete source mod into CK3's local mod directory and replace only the selected source localization with the validated target localization
 - Select Local LLM, OpenAI, OpenRouter, NanoGPT pay-as-you-go, or NanoGPT subscription mode
 - Build the translated results into one standalone CK3 mod, launcher descriptor, manifest, and deterministic ZIP
 - Support Japanese and other user-selected target languages and `l_<locale>` headers
@@ -26,28 +31,29 @@ Local LLM mode is the default. Users may explicitly select OpenAI, OpenRouter, o
 
 ## Use the Windows app
 
-Download the release ZIP from [GitHub Releases](https://github.com/Rimcat-JA/translate-ck3-mods/releases/latest) and launch `CK3_Japanese_Mod_Maker.exe`; Python and command-line work are not required.
+Download the release ZIP from [GitHub Releases](https://github.com/Rimcat-JA/translate-ck3-mods/releases/latest) and launch `CK3_Mod_Translator.exe`; Python and command-line work are not required.
 
 1. For local mode, load a model and start the LM Studio Local Server.
-2. Select a translation provider. Local LLM is the default.
-3. Select an extracted CK3 mod folder.
-4. Press **Create Japanese Mod**.
+2. Select **Auto-detect** for the source language and choose the target language.
+3. Scan CK3's mod folder, another mod library, an individual mod folder, or one or more `.mod` descriptors.
+4. Review the detected language and status, check the mods you want, and press **Translate Selected Mods**.
 
 The app writes the complete translated clone and launcher descriptor to:
 
 ```text
-Documents\Paradox Interactive\Crusader Kings III\mod\<source>_Japanese
-Documents\Paradox Interactive\Crusader Kings III\mod\<source>_Japanese.mod
+Documents\Paradox Interactive\Crusader Kings III\mod\<source>_<TargetLanguage>
+Documents\Paradox Interactive\Crusader Kings III\mod\<source>_<TargetLanguage>.mod
 ```
 
-The source is never modified. In the clone, `localization/english` is replaced by validated `localization/japanese`; scripts, assets, clothing, audio, and other files are byte-verified copies. Enable the generated clone instead of enabling it together with the original.
+The source is never modified. The scanner distinguishes actual text language from CK3 storage locale, so Japanese values placed beneath `l_english` are still reported as Japanese and cannot be selected for a Japanese target. In a generated clone, only the selected source/target localization files are replaced; scripts, assets, clothing, audio, and other files are byte-verified copies. Enable the clone instead of enabling it together with the original.
 
-Remote modes send localization text to the selected official provider and may incur charges. API keys can be encrypted in Windows Credential Manager. Settings, logs, and caches stay under `%LOCALAPPDATA%\CK3JapaneseModMaker`; logs never contain API keys or translation text.
+Remote modes send localization text to the selected official provider and may incur charges. API keys can be encrypted in Windows Credential Manager. Settings, logs, and caches stay under `%LOCALAPPDATA%\CK3JapaneseModMaker`; the v1 directory name is retained so upgrades reuse existing settings and translation memory. Logs never contain API keys or translation text.
 
 ## Requirements
 
 - Windows 10/11 for the packaged executable
-- An extracted CK3 mod folder containing `localization/english`
+- An extracted CK3 mod with `descriptor.mod`, or an external `.mod` descriptor that resolves to one
+- Natural-language CK3 localization YAML in at least one recognized locale for mods being translated
 - A local LLM server or an API key for the explicitly selected remote provider
 
 Python 3.10 or later is required only for source execution or building.
@@ -115,7 +121,13 @@ This generates the single-file EXE, SHA256 checksum, and a distributable ZIP und
 
 ## CLI usage
 
-Create a complete Japanese clone from one path:
+Inspect a mod library without contacting any model:
+
+```powershell
+python scripts/ck3_mod_scanner.py "C:\path\to\Crusader Kings III\mod"
+```
+
+Create a complete translated clone from one path (English to Japanese is the CLI default):
 
 ```powershell
 python scripts/ck3_clone.py "C:\path\to\Example Mod"
@@ -150,6 +162,8 @@ python scripts/ck3_localize.py translate `
   --mod "Example Mod=C:\path\to\Example Mod" `
   --output "C:\work\ck3-ja" `
   --cache "C:\work\ck3-ja.sqlite" `
+  --source-language English `
+  --source-locale l_english `
   --language Japanese `
   --locale l_japanese `
   --endpoint http://127.0.0.1:1234/v1/chat/completions `
@@ -181,6 +195,8 @@ Validate staged files without contacting the model:
 python scripts/ck3_localize.py validate `
   --mod "Example Mod=C:\path\to\Example Mod" `
   --output "C:\work\ck3-ja" `
+  --source-language English `
+  --source-locale l_english `
   --language Japanese `
   --locale l_japanese
 ```
@@ -207,6 +223,7 @@ Existing localization is moved outside CK3's localization loading tree:
 - Match `--workers` to the local server's configured parallel limit.
 - When a server rejects JSON Schema, the script automatically falls back to ordinary JSON output.
 - Successful entries remain in SQLite even when some entries fail. Rerun the same command after adjusting settings.
+- Auto-detected low-confidence text is not selected automatically. Choose the source language explicitly after reviewing the mod.
 - Never place backups beneath `localization`; CK3 may load the old keys as duplicates.
 
 See [SKILL.md](SKILL.md) for the agent workflow and [references/ck3-localization.md](references/ck3-localization.md) for CK3-specific validation rules.
@@ -221,6 +238,8 @@ agents/openai.yaml                Codex UI metadata
 scripts/ck3_localize.py           Translation, validation, and installation CLI
 scripts/ck3_clone.py              Complete-clone single-mod translation engine
 scripts/ck3_gui.py                Windows desktop UI entry point
+scripts/ck3_mod_scanner.py        Descriptor, structure, and actual-language scanner
+scripts/ck3_languages.py          CK3 locale registry and localization path mapping
 scripts/ck3_providers.py          Provider definitions and endpoint allowlist
 scripts/windows_credentials.py    Windows Credential Manager integration
 scripts/ck3_pipeline.py           One-command local translation and packaging pipeline

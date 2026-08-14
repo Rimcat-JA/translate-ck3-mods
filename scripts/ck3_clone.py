@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Create a complete Japanese clone of one CK3 mod.
+"""Create a complete translated clone of one CK3 mod.
 
 The selected LLM/API is used only by ck3_localize.py to translate localization
 values. Copying, descriptor editing, validation, backups, and manifests are
@@ -23,7 +23,8 @@ import urllib.request
 from collections.abc import Callable
 from pathlib import Path
 
-from ck3_localize import ModSpec, command_translate, locale_id, parse_mod
+from ck3_languages import discover_locale_files, language_spec, normalize_language_id
+from ck3_localize import ModSpec, command_translate, parse_mod
 from ck3_providers import PROVIDERS, get_provider, models_endpoint, validate_endpoint
 
 ProgressCallback = Callable[[dict[str, object]], None]
@@ -44,6 +45,8 @@ class CloneOptions:
     workers: int = 4
     overwrite: bool = False
     work_root: Path | None = None
+    source_language: str = "English"
+    source_locale: str = "l_english"
     language: str = "Japanese"
     locale: str = "l_japanese"
     batch_items: int = 8
@@ -85,9 +88,14 @@ def discover_models(endpoint: str, timeout: int = 5, provider: str = "local", ap
     return list(dict.fromkeys(models))
 
 
-def default_output(source: Path) -> Path:
+def default_output(source: Path, target_language: str = "Japanese") -> Path:
+    try:
+        display = language_spec(target_language).display_name
+    except ValueError:
+        display = target_language.strip() or "Translated"
+    suffix = re.sub(r"[^A-Za-z0-9_-]+", "_", display).strip("_") or "Translated"
     destination = ck3_mod_directory()
-    return destination / f"{source.name}_Japanese" if destination else source.parent / f"{source.name}_Japanese"
+    return destination / f"{source.name}_{suffix}" if destination else source.parent / f"{source.name}_{suffix}"
 
 
 def ck3_mod_directory() -> Path | None:
@@ -124,18 +132,23 @@ def is_same_or_inside(child: Path, parent: Path) -> bool:
         return False
 
 
-def validate_paths(source: Path, output: Path) -> ModSpec:
+def validate_paths(
+    source: Path,
+    output: Path,
+    source_locale: str = "l_english",
+    source_language: str = "English",
+) -> ModSpec:
     source = source.expanduser().resolve()
     output = output.expanduser().resolve()
-    spec = parse_mod(f"{safe_stage_name(source)}={source}")
-    if not any(spec.english_root.rglob("*.yml")):
-        raise RuntimeError(f"英語ローカライズYMLがありません: {spec.english_root}")
+    spec = parse_mod(f"{safe_stage_name(source)}={source}", source_locale, source_language)
+    if not spec.source_files:
+        raise RuntimeError(f"No source-localization YML files were found: {source / 'localization'}")
     if source == output:
-        raise ValueError("出力先を元MODと同じ場所にはできません。")
+        raise ValueError("The output cannot be the source mod itself.")
     if is_same_or_inside(output, source):
-        raise ValueError("出力先を元MODフォルダの内部にはできません。")
+        raise ValueError("The output cannot be inside the source mod folder.")
     if is_same_or_inside(source, output):
-        raise ValueError("元MODを包含するフォルダは出力先にできません。")
+        raise ValueError("The output cannot contain the source mod folder.")
     return spec
 
 
@@ -149,8 +162,8 @@ def sha256_file(path: Path) -> str:
 
 def source_fingerprint(spec: ModSpec) -> str:
     digest = hashlib.sha256()
-    for path in sorted(spec.english_root.rglob("*.yml"), key=lambda item: item.as_posix().casefold()):
-        digest.update(path.relative_to(spec.english_root).as_posix().encode("utf-8"))
+    for path in spec.source_files:
+        digest.update(path.relative_to(spec.root).as_posix().encode("utf-8"))
         digest.update(path.read_bytes())
     return digest.hexdigest()
 
@@ -206,6 +219,8 @@ def run_translation(
         mod=[f"{spec.name}={spec.root}"],
         output=str(staging),
         cache=str(cache),
+        source_language=options.source_language,
+        source_locale=options.source_locale,
         language=options.language,
         locale=options.locale,
         endpoint=options.endpoint,
@@ -233,16 +248,16 @@ def run_translation(
             command_translate(arguments)
     except SystemExit as exc:
         if cancel_event and cancel_event.is_set():
-            raise CancelledError("処理をキャンセルしました。翻訳キャッシュは保持されています。") from exc
-        raise RuntimeError(f"翻訳処理に失敗しました（終了コード {exc.code}）。ログを確認してください。") from exc
+            raise CancelledError("Translation was cancelled. The translation cache was kept.") from exc
+        raise RuntimeError(f"Translation failed with exit code {exc.code}; check the log.") from exc
     except Exception as exc:
         if cancel_event and cancel_event.is_set():
-            raise CancelledError("処理をキャンセルしました。翻訳キャッシュは保持されています。") from exc
+            raise CancelledError("Translation was cancelled. The translation cache was kept.") from exc
         raise
     finally:
         writer.flush()
     if cancel_event and cancel_event.is_set():
-        raise CancelledError("処理をキャンセルしました。翻訳キャッシュは保持されています。")
+        raise CancelledError("Translation was cancelled. The translation cache was kept.")
     return files, entries
 
 
@@ -251,16 +266,25 @@ def descriptor_name(text: str, fallback: str) -> str:
     return match.group(1).replace(r'\"', '"') if match else fallback
 
 
-def translated_display_name(name: str) -> str:
-    return name if "日本語" in name else f"{name}（日本語化）"
+def translated_display_name(name: str, language: str = "Japanese", legacy_label: bool = False) -> str:
+    if legacy_label and language.strip().casefold() == "japanese":
+        return name if "日本語" in name else f"{name}（日本語化）"
+    suffix = f"({language.strip()} Translation)"
+    return name if name.casefold().endswith(suffix.casefold()) else f"{name} {suffix}"
 
 
-def update_descriptor(path: Path, fallback_name: str, launcher_path: Path | None = None) -> str:
+def update_descriptor(
+    path: Path,
+    fallback_name: str,
+    launcher_path: Path | None = None,
+    language: str = "Japanese",
+    legacy_label: bool = False,
+) -> str:
     if path.is_file():
         text = path.read_text(encoding="utf-8-sig", errors="replace")
     else:
         text = 'tags={\n    "Translation"\n}\n'
-    name = translated_display_name(descriptor_name(text, fallback_name)).replace('"', r'\"')
+    name = translated_display_name(descriptor_name(text, fallback_name), language, legacy_label).replace('"', r'\"')
     if re.search(r'^\s*name\s*=', text, flags=re.MULTILINE):
         text = re.sub(r'^\s*name\s*=.*$', f'name="{name}"', text, count=1, flags=re.MULTILINE)
     else:
@@ -279,59 +303,98 @@ def copy_and_replace(
     clone: Path,
     locale: str,
     callback: ProgressCallback | None,
+    target_language: str = "Japanese",
+    legacy_label: bool = False,
 ) -> int:
-    emit(callback, "copying", message="元MOD全体を複製しています…")
+    emit(callback, "copying", message="Copying the complete source mod...")
     shutil.copytree(spec.root, clone)
+    target_id = normalize_language_id(locale)
+    source_paths = {path.relative_to(spec.root) for path in spec.source_files}
+    old_target_paths = {
+        path.relative_to(spec.root) for path in discover_locale_files(spec.root, target_id)
+    }
+    replacement_paths = source_paths | old_target_paths
+    for relative in replacement_paths:
+        candidate = clone / relative
+        if candidate.is_file() or candidate.is_symlink():
+            candidate.unlink()
+
+    staged_files = sorted(
+        (path for path in staged_mod.rglob("*.yml") if path.is_file()),
+        key=lambda item: item.relative_to(staged_mod).as_posix().casefold(),
+    )
+    if not staged_files:
+        raise FileNotFoundError(f"No validated translated YML files were found: {staged_mod}")
+    for source_file in staged_files:
+        relative = source_file.relative_to(staged_mod)
+        original = spec.root / relative
+        if original.is_file() and relative not in replacement_paths:
+            raise RuntimeError(f"Translated output would overwrite a different source locale: {relative}")
+        destination = clone / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source_file, destination)
+
     localization = clone / "localization"
-    english = clone / spec.english_root.relative_to(spec.root)
-    target = localization / locale_id(locale)
-    if english.exists():
-        shutil.rmtree(english)
-    if target.exists():
-        shutil.rmtree(target)
-    staged_locale = staged_mod / "localization" / locale_id(locale)
-    if not staged_locale.is_dir():
-        raise FileNotFoundError(f"検証済み翻訳フォルダがありません: {staged_locale}")
-    target.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copytree(staged_locale, target)
+    if localization.is_dir():
+        for directory in sorted(
+            (path for path in localization.rglob("*") if path.is_dir()),
+            key=lambda item: len(item.parts),
+            reverse=True,
+        ):
+            with contextlib.suppress(OSError):
+                directory.rmdir()
     descriptor = clone / "descriptor.mod"
-    descriptor.write_text(update_descriptor(descriptor, spec.root.name), encoding="utf-8", newline="\n")
+    descriptor.write_text(
+        update_descriptor(descriptor, spec.root.name, language=target_language, legacy_label=legacy_label),
+        encoding="utf-8",
+        newline="\n",
+    )
     return sum(1 for path in clone.rglob("*") if path.is_file())
 
 
 def verify_clone(spec: ModSpec, staged_mod: Path, clone: Path, locale: str) -> None:
-    cloned_english = clone / spec.english_root.relative_to(spec.root)
-    if cloned_english.exists():
-        raise RuntimeError("複製先に英語ローカライズが残っています。")
-    staged_locale = staged_mod / "localization" / locale_id(locale)
-    cloned_locale = clone / "localization" / locale_id(locale)
-    staged_files = sorted(path.relative_to(staged_locale) for path in staged_locale.rglob("*.yml"))
-    cloned_files = sorted(path.relative_to(cloned_locale) for path in cloned_locale.rglob("*.yml"))
-    if staged_files != cloned_files:
-        raise RuntimeError("複製先の日本語ローカライズファイル構成が翻訳結果と一致しません。")
-    for relative in staged_files:
-        if (staged_locale / relative).read_bytes() != (cloned_locale / relative).read_bytes():
-            raise RuntimeError(f"複製先で翻訳ファイルが変化しました: {relative}")
+    target_id = normalize_language_id(locale)
+    source_paths = {path.relative_to(spec.root) for path in spec.source_files}
+    old_target_paths = {
+        path.relative_to(spec.root) for path in discover_locale_files(spec.root, target_id)
+    }
+    replaced_paths = source_paths | old_target_paths
+    staged_files = sorted(
+        (path for path in staged_mod.rglob("*.yml") if path.is_file()),
+        key=lambda item: item.relative_to(staged_mod).as_posix().casefold(),
+    )
+    staged_paths = {path.relative_to(staged_mod) for path in staged_files}
+    for staged_file in staged_files:
+        relative = staged_file.relative_to(staged_mod)
+        cloned_file = clone / relative
+        if not cloned_file.is_file() or staged_file.read_bytes() != cloned_file.read_bytes():
+            raise RuntimeError(f"A translated file changed in the clone: {relative}")
+    for relative in replaced_paths - staged_paths:
+        if (clone / relative).exists():
+            raise RuntimeError(f"A replaced source/target localization file remains: {relative}")
 
-    ignored_roots = {spec.english_root.relative_to(spec.root), Path(f"localization/{locale_id(locale)}")}
     for source_file in (path for path in spec.root.rglob("*") if path.is_file()):
         relative = source_file.relative_to(spec.root)
-        if relative == Path("descriptor.mod") or any(root == relative or root in relative.parents for root in ignored_roots):
+        if relative == Path("descriptor.mod") or relative in replaced_paths:
             continue
         target_file = clone / relative
         if not target_file.is_file() or sha256_file(source_file) != sha256_file(target_file):
-            raise RuntimeError(f"元MODのファイルが正しく複製されていません: {relative}")
+            raise RuntimeError(f"A non-localization source file was not copied byte-for-byte: {relative}")
 
 
-def backup_existing(output: Path, launcher: Path) -> Path | None:
+def backup_existing(
+    output: Path,
+    launcher: Path,
+    directory_name: str = "_ck3_japanese_backups",
+) -> Path | None:
     existing = [path for path in (output, launcher) if path.exists()]
     if not existing:
         return None
     stamp = dt.datetime.now(dt.timezone.utc).astimezone().strftime("%Y%m%d_%H%M%S")
-    backup = output.parent / "_ck3_japanese_backups" / f"{output.name}_{stamp}"
+    backup = output.parent / directory_name / f"{output.name}_{stamp}"
     serial = 1
     while backup.exists():
-        backup = output.parent / "_ck3_japanese_backups" / f"{output.name}_{stamp}_{serial}"
+        backup = output.parent / directory_name / f"{output.name}_{stamp}_{serial}"
         serial += 1
     backup.mkdir(parents=True)
     moved: list[tuple[Path, Path]] = []
@@ -389,30 +452,41 @@ def finalize_clone(
         raise
 
 
-def create_japanese_clone(
+def _create_localized_clone(
     options: CloneOptions,
     callback: ProgressCallback | None = None,
     cancel_event: threading.Event | None = None,
+    *,
+    legacy_compat: bool = False,
 ) -> CloneResult:
     source = options.source.expanduser().resolve()
-    output = (options.output or default_output(source)).expanduser().resolve()
+    output = (options.output or default_output(source, options.language)).expanduser().resolve()
     provider = get_provider(options.provider)
+    provider_name = {
+        "local": "Local LLM",
+        "openai": "OpenAI API",
+        "openrouter": "OpenRouter API",
+        "nanogpt": "NanoGPT API",
+        "nanogpt_subscription": "NanoGPT Subscription API",
+    }.get(options.provider, provider.label)
     validate_endpoint(options.provider, options.endpoint)
     if provider.requires_key and not options.api_key:
-        raise RuntimeError(f"{provider.label}のAPIキーを入力してください。")
-    spec = validate_paths(source, output)
+        raise RuntimeError(f"Enter an API key for {provider_name}.")
+    if options.source_language.strip().casefold() == options.language.strip().casefold():
+        raise ValueError("Source and target language are the same; translation is not needed.")
+    spec = validate_paths(source, output, options.source_locale, options.source_language)
     launcher = output.parent / f"{output.name}.mod"
     if (output.exists() or launcher.exists()) and not options.overwrite:
-        raise FileExistsError("出力先が既に存在します。上書きを選ぶと、既存版をバックアップして作り直します。")
-    emit(callback, "checking", message=f"MODと{provider.label}を確認しています…")
+        raise FileExistsError("The output already exists. Enable overwrite to back it up and rebuild it.")
+    emit(callback, "checking", message=f"Checking the mod and {provider_name}...")
     models = discover_models(options.endpoint, provider=options.provider, api_key=options.api_key) if options.provider == "local" or not options.model else []
     model = options.model or (models[0] if models else None)
     if not model:
         if options.provider == "local":
-            raise RuntimeError("ローカルLLMが読み込まれていません。LM StudioでモデルとLocal Serverを開始してください。")
-        raise RuntimeError(f"{provider.label}からモデルを取得できません。モデルIDとAPIキーを確認してください。")
+            raise RuntimeError("No local LLM is loaded. Load a model and start the LM Studio Local Server.")
+        raise RuntimeError(f"No model is available from {provider_name}; check the model ID and API key.")
     if options.provider == "local" and options.model and models and options.model not in models:
-        raise RuntimeError(f"指定モデルがローカルサーバーにありません: {options.model}")
+        raise RuntimeError(f"The requested model is not loaded on the local server: {options.model}")
     emit(callback, "model_selected", model=model)
 
     work_root = (options.work_root or default_work_root()).expanduser().resolve()
@@ -430,28 +504,60 @@ def create_japanese_clone(
     try:
         files, entries = run_translation(options, spec, model, staging, cache, callback, cancel_event)
         if cancel_event and cancel_event.is_set():
-            raise CancelledError("処理をキャンセルしました。翻訳キャッシュは保持されています。")
+            raise CancelledError("Translation was cancelled. The translation cache was kept.")
         staged_mod = staging / spec.name
-        files_copied = copy_and_replace(spec, staged_mod, clone, options.locale, callback)
-        emit(callback, "verifying", message="完全コピーと日本語置換を検証しています…")
+        files_copied = copy_and_replace(
+            spec,
+            staged_mod,
+            clone,
+            options.locale,
+            callback,
+            options.language,
+            legacy_compat,
+        )
+        emit(callback, "verifying", message="Verifying the complete copy and localized replacements...")
         verify_clone(spec, staged_mod, clone, options.locale)
         launcher_temp = temporary_output / launcher.name
-        launcher_temp.write_text(update_descriptor(clone / "descriptor.mod", spec.root.name, output), encoding="utf-8", newline="\n")
+        launcher_temp.write_text(
+            update_descriptor(
+                clone / "descriptor.mod",
+                spec.root.name,
+                output,
+                options.language,
+                legacy_compat,
+            ),
+            encoding="utf-8",
+            newline="\n",
+        )
         manifest = {
-            "schema": 1,
+            "schema": 2,
             "source_name": spec.root.name,
             "source_localization_sha256": source_fingerprint(spec),
+            "source_language": options.source_language,
+            "source_locale": f"l_{normalize_language_id(options.source_locale)}",
+            "target_language": options.language,
+            "target_locale": f"l_{normalize_language_id(options.locale)}",
+            # Retain the version-1 fields for downstream readers.
             "language": options.language,
             "locale": options.locale,
             "translation_engine": options.provider,
             "translation_model": model,
             "counts": {"copied_files": files_copied, "localization_files": files, "entries": entries},
         }
-        (clone / "japanese-clone-manifest.json").write_text(
-            json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8", newline="\n"
+        manifest_text = json.dumps(manifest, ensure_ascii=False, indent=2) + "\n"
+        (clone / "translation-clone-manifest.json").write_text(
+            manifest_text, encoding="utf-8", newline="\n"
         )
+        if legacy_compat and options.language.strip().casefold() == "japanese":
+            (clone / "japanese-clone-manifest.json").write_text(
+                manifest_text, encoding="utf-8", newline="\n"
+            )
         if options.overwrite:
-            backup = backup_existing(output, launcher)
+            backup = backup_existing(
+                output,
+                launcher,
+                "_ck3_japanese_backups" if legacy_compat else "_ck3_translation_backups",
+            )
         finalize_clone(clone, launcher_temp, output, launcher, backup)
         result = CloneResult(output, launcher, backup, model, files_copied, files, entries, cache)
         emit(callback, "done", output=str(output), launcher=str(launcher), entries=entries, files=files)
@@ -461,6 +567,24 @@ def create_japanese_clone(
         shutil.rmtree(temporary_output, ignore_errors=True)
 
 
+def create_localized_clone(
+    options: CloneOptions,
+    callback: ProgressCallback | None = None,
+    cancel_event: threading.Event | None = None,
+) -> CloneResult:
+    """Create a generic source-to-target translation clone."""
+    return _create_localized_clone(options, callback, cancel_event)
+
+
+def create_japanese_clone(
+    options: CloneOptions,
+    callback: ProgressCallback | None = None,
+    cancel_event: threading.Event | None = None,
+) -> CloneResult:
+    """Version-1 compatibility wrapper; new code should use create_localized_clone."""
+    return _create_localized_clone(options, callback, cancel_event, legacy_compat=True)
+
+
 def console_progress(event: dict[str, object]) -> None:
     stream = sys.__stdout__ or sys.stdout
     stream.write(json.dumps(event, ensure_ascii=False) + "\n")
@@ -468,9 +592,13 @@ def console_progress(event: dict[str, object]) -> None:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Copy one CK3 mod and replace its English localization with validated Japanese")
+    parser = argparse.ArgumentParser(description="Copy one CK3 mod and replace one source localization with a validated translation")
     parser.add_argument("source", help="path to the source CK3 mod folder")
-    parser.add_argument("--output", help="output mod folder (default: CK3 local-mod directory/<source>_Japanese)")
+    parser.add_argument("--output", help="output mod folder (default: CK3 local-mod directory/<source>_<target>)")
+    parser.add_argument("--source-language", default="English", help="actual language of the source text")
+    parser.add_argument("--source-locale", default="l_english", help="CK3 locale/header containing the source text")
+    parser.add_argument("--target-language", "--language", dest="language", default="Japanese")
+    parser.add_argument("--target-locale", "--locale", dest="locale", default="l_japanese")
     parser.add_argument("--endpoint", help="provider endpoint; uses the selected provider default when omitted")
     parser.add_argument("--provider", choices=tuple(PROVIDERS), default="local")
     parser.add_argument("--api-key-env", help="environment variable containing a remote provider API key")
@@ -483,7 +611,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     args = build_parser().parse_args()
-    result = create_japanese_clone(
+    result = create_localized_clone(
         CloneOptions(
             source=Path(args.source),
             output=Path(args.output) if args.output else None,
@@ -494,6 +622,10 @@ def main() -> None:
             workers=args.workers,
             work_root=Path(args.work_root) if args.work_root else None,
             overwrite=args.overwrite,
+            source_language=args.source_language,
+            source_locale=args.source_locale,
+            language=args.language,
+            locale=args.locale,
         ),
         console_progress,
     )

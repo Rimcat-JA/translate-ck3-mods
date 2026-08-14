@@ -21,7 +21,7 @@ if ($LASTEXITCODE -ne 0) {
     --clean `
     --onefile `
     --windowed `
-    --name "CK3_Japanese_Mod_Maker" `
+    --name "CK3_Mod_Translator" `
     --icon $iconFile `
     --version-file $versionFile `
     --distpath $distPath `
@@ -33,15 +33,16 @@ if ($LASTEXITCODE -ne 0) {
     throw "PyInstaller failed with exit code $LASTEXITCODE"
 }
 
-$exe = Join-Path $distPath "CK3_Japanese_Mod_Maker.exe"
+$exe = Join-Path $distPath "CK3_Mod_Translator.exe"
 $hash = Get-FileHash -Algorithm SHA256 -LiteralPath $exe
 Write-Host "Built: $exe"
 Write-Host "SHA256: $($hash.Hash)"
 
 & $Python (Join-Path $repoRoot "packaging\create_release.py") `
     --exe $exe `
-    --guide (Join-Path $repoRoot "packaging\使い方.txt") `
-    --version "1.0.0"
+    --guide (Join-Path $repoRoot "packaging\Quick_Start.txt") `
+    --guide-ja (Join-Path $repoRoot "packaging\使い方.txt") `
+    --version "2.0.0"
 
 if ($LASTEXITCODE -ne 0) {
     throw "Release packaging failed with exit code $LASTEXITCODE"
