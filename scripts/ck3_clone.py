@@ -19,10 +19,13 @@ import shutil
 import sys
 import tempfile
 import threading
+import urllib.error
+import urllib.parse
 import urllib.request
 from collections.abc import Callable
 from pathlib import Path
 
+from ck3_http import urlopen_no_redirect
 from ck3_languages import discover_locale_files, language_spec, normalize_language_id
 from ck3_localize import ModSpec, command_translate, parse_mod
 from ck3_providers import PROVIDERS, get_provider, models_endpoint, validate_endpoint
@@ -76,16 +79,104 @@ def emit(callback: ProgressCallback | None, event: str, **values: object) -> Non
         callback({"event": event, **values})
 
 
+def _model_ids(payload: object) -> list[str]:
+    """Read OpenAI-compatible and LM Studio native model-list payloads."""
+    if not isinstance(payload, dict):
+        return []
+
+    candidates: list[object] = []
+
+    def is_translation_model(row: object) -> bool:
+        if not isinstance(row, dict):
+            return True
+        model_type = row.get("type")
+        if not isinstance(model_type, str):
+            return True
+        return model_type.strip().casefold() not in {"embedding", "embeddings"}
+
+    data = payload.get("data")
+    if isinstance(data, list):
+        candidates.extend(
+            row.get("id") or row.get("key") if isinstance(row, dict) else row
+            for row in data
+            if is_translation_model(row)
+        )
+    models = payload.get("models")
+    if isinstance(models, list):
+        # LM Studio's native /api/v1/models endpoint uses `key` for the
+        # JIT-loadable model identifier. Some older/native-compatible servers
+        # expose the same value as `id` instead.
+        candidates.extend(
+            row.get("key") or row.get("id") if isinstance(row, dict) else row
+            for row in models
+            if is_translation_model(row)
+        )
+
+    identifiers: list[str] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        if not isinstance(candidate, str):
+            continue
+        identifier = candidate.strip()
+        if identifier and identifier not in seen:
+            identifiers.append(identifier)
+            seen.add(identifier)
+    return identifiers
+
+
+def _native_models_endpoints(endpoint: str) -> tuple[str, str]:
+    parsed = urllib.parse.urlsplit(endpoint)
+    return tuple(
+        urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, path, "", ""))
+        for path in ("/api/v1/models", "/api/v0/models")
+    )
+
+
+def model_discovery_endpoints(endpoint: str, provider: str = "local") -> tuple[str, ...]:
+    """Return validated model-list URLs in provider-specific preference order."""
+    primary = models_endpoint(provider, endpoint)
+    if provider != "local":
+        return (primary,)
+    native_v1, native_v0 = _native_models_endpoints(endpoint)
+    # Prefer native v1's type metadata so embedding-only downloads cannot
+    # become the automatically selected translation model.
+    return tuple(dict.fromkeys((native_v1, primary, native_v0)))
+
+
 def discover_models(endpoint: str, timeout: int = 5, provider: str = "local", api_key: str | None = None) -> list[str]:
+    # Validate and derive every destination before a credential-bearing header
+    # is constructed.
+    discovery_endpoints = model_discovery_endpoints(endpoint, provider)
     headers = {"Accept": "application/json"}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
-    request = urllib.request.Request(models_endpoint(provider, endpoint), headers=headers)
-    with urllib.request.urlopen(request, timeout=timeout) as response:
-        payload = json.loads(response.read().decode("utf-8"))
-    rows = payload.get("data", []) if isinstance(payload, dict) else []
-    models = [str(row["id"]) for row in rows if isinstance(row, dict) and row.get("id")]
-    return list(dict.fromkeys(models))
+
+    first_error: Exception | None = None
+    received_response = False
+    for discovery_endpoint in discovery_endpoints:
+        request = urllib.request.Request(discovery_endpoint, headers=headers)
+        try:
+            with urlopen_no_redirect(request, timeout=timeout) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+        except (OSError, UnicodeError, ValueError) as exc:
+            if provider != "local":
+                raise
+            if isinstance(exc, urllib.error.HTTPError):
+                exc.close()
+                if exc.code in {401, 403}:
+                    # Authentication failures are actionable and apply to the
+                    # server, so do not hide them behind alternate-path probes.
+                    raise
+            first_error = first_error or exc
+            continue
+        received_response = True
+        identifiers = _model_ids(payload)
+        if identifiers:
+            return identifiers
+
+    if not received_response and first_error is not None:
+        raise first_error
+    return []
 
 
 def default_output(source: Path, target_language: str = "Japanese") -> Path:
@@ -479,14 +570,27 @@ def _create_localized_clone(
     if (output.exists() or launcher.exists()) and not options.overwrite:
         raise FileExistsError("The output already exists. Enable overwrite to back it up and rebuild it.")
     emit(callback, "checking", message=f"Checking the mod and {provider_name}...")
-    models = discover_models(options.endpoint, provider=options.provider, api_key=options.api_key) if options.provider == "local" or not options.model else []
-    model = options.model or (models[0] if models else None)
+    # An explicit model ID is authoritative. LM Studio can JIT-load downloaded
+    # models that are absent from /v1/models, and some authenticated/local
+    # configurations do not expose a model-list endpoint at all.
+    model = options.model.strip() if options.model else None
+    models = (
+        []
+        if model
+        else discover_models(
+            options.endpoint,
+            provider=options.provider,
+            api_key=options.api_key,
+        )
+    )
+    model = model or (models[0] if models else None)
     if not model:
         if options.provider == "local":
-            raise RuntimeError("No local LLM is loaded. Load a model and start the LM Studio Local Server.")
+            raise RuntimeError(
+                "No compatible local model was discovered. Start the LM Studio Local Server, "
+                "then enter the exact model ID or load a chat model and enable JIT loading."
+            )
         raise RuntimeError(f"No model is available from {provider_name}; check the model ID and API key.")
-    if options.provider == "local" and options.model and models and options.model not in models:
-        raise RuntimeError(f"The requested model is not loaded on the local server: {options.model}")
     emit(callback, "model_selected", model=model)
 
     work_root = (options.work_root or default_work_root()).expanduser().resolve()
@@ -601,8 +705,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--target-locale", "--locale", dest="locale", default="l_japanese")
     parser.add_argument("--endpoint", help="provider endpoint; uses the selected provider default when omitted")
     parser.add_argument("--provider", choices=tuple(PROVIDERS), default="local")
-    parser.add_argument("--api-key-env", help="environment variable containing a remote provider API key")
-    parser.add_argument("--model", help="model id; local mode automatically selects the first loaded model when omitted")
+    parser.add_argument(
+        "--api-key-env",
+        help="environment variable containing a provider token (optional for authenticated local servers)",
+    )
+    parser.add_argument(
+        "--model",
+        help="exact model id; when omitted, local mode selects the first discovered chat model (including JIT candidates)",
+    )
     parser.add_argument("--workers", type=int, default=4)
     parser.add_argument("--work-root", help="cache and temporary-work directory")
     parser.add_argument("--overwrite", action="store_true", help="back up and replace an existing generated clone")

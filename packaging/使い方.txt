@@ -1,4 +1,4 @@
-CK3 Mod Translator v2.0.0
+CK3 Mod Translator v2.0.1
 ================================
 
 【すぐ使う】
@@ -25,7 +25,12 @@ CK3ランチャーでは言語名が付いた生成版を有効にし、同じ�
 【翻訳方式】
 
 - ローカルLLM（既定）
-  LM Studioでモデルを読み込み、Local Serverを開始してください。
+  LM StudioでLocal Serverを開始し、チャット用モデルを読み込むかJIT読み込みを有効にしてください。
+  Advanced Settingsの「Refresh Models」を押します。
+  /api/v1/models、/v1/models、/api/v0/modelsに対応しています。
+  一覧が空でも、モデル欄へ正確なモデルIDを直接入力できます。
+  LM Studioで認証を有効にした場合だけ、任意のローカルAPIトークンを入力します。
+  保存したトークンはWindows資格情報マネージャーだけに格納されます。
   英文はPC外へ送信されず、API料金も発生しません。
 
 - OpenAI / OpenRouter / NanoGPT
@@ -38,13 +43,14 @@ CK3ランチャーでは言語名が付いた生成版を有効にし、同じ�
 - 元MODは一切変更しません。
 - 翻訳と検証に成功してから完全コピーを生成します。
 - 作り直す場合、既存の生成版は _ck3_translation_backups へ退避します。
-- APIキーや翻訳本文を設定ファイル／ログ／manifestへ記録しません。
+- APIキー／トークンや翻訳本文を設定ファイル／ログ／manifestへ記録しません。
 - 設定と進捗ログは %LOCALAPPDATA%\CK3JapaneseModMaker のPC内だけに保存します。
 - APIキーは選択したサービスの公式HTTPSエンドポイント以外へ送信できません。
 
 【困った場合】
 
-- 「未接続」: LM StudioのLocal Server、ポート1234、またはAPIキーを確認してください。
+- 「未接続」: LM StudioのDeveloper画面でLocal Serverを開始し、接続先のホストとポートが一致しているか確認してください。
+- 「モデル一覧が空」: チャット用モデルをインポート／ダウンロードし、読み込むかJITを有効にして「Refresh Models」を再実行します。それでも空なら正確なモデルIDを直接入力してください。
 - 「Invalid mod」: descriptor.modがあるMODの一番外側、または外部.modファイルを選び直してください。
 - 「Non-linguistic」: 翻訳対象になるローカライズ文章がありません。
 - 大型MOD: 数千項目ある場合は長時間かかります。途中終了しても既訳はキャッシュされます。

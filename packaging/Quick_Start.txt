@@ -1,4 +1,4 @@
-CK3 Mod Translator v2.0.0
+CK3 Mod Translator v2.0.1
 =========================
 
 QUICK START
@@ -24,18 +24,21 @@ LANGUAGE DETECTION
 
 TRANSLATION PROVIDERS
 
-- Local LLM (default): Start the LM Studio Local Server after loading a model. Text stays on this PC and no API fee is charged.
+- Local LLM (default): Start the LM Studio Local Server. Load a chat model or enable Just-in-Time (JIT) model loading. Text stays on this PC and no API fee is charged.
+- In Advanced Settings, press Refresh Models. The app supports LM Studio /api/v1/models, /v1/models, and /api/v0/models. If the list is empty, type the exact model identifier in the editable model field.
+- If LM Studio requires authentication, enter its optional local API token. Saved tokens use Windows Credential Manager only.
 - OpenAI / OpenRouter / NanoGPT: Select the provider explicitly, enter an API key and model, and confirm before sending localization text. Charges may apply.
 
-Saved API keys are encrypted with Windows Credential Manager. Settings, logs, and translation caches remain under:
+Saved API keys and local-server tokens are encrypted with Windows Credential Manager. Settings, logs, and translation caches remain under:
 
   %LOCALAPPDATA%\CK3JapaneseModMaker
 
-The application never stores API keys or localization text in logs or manifests.
+The application never stores API keys, tokens, or localization text in logs or manifests.
 
 TROUBLESHOOTING
 
-- No local connection: Check LM Studio Local Server and port 1234.
+- No local connection: Start LM Studio's Developer server and check that the endpoint host and port match its settings.
+- Empty model list: Import/download a chat model, load it or enable JIT, and press Refresh Models again. If needed, paste its exact model identifier manually.
 - Invalid mod: Select the folder containing descriptor.mod, or select its external .mod descriptor.
 - Non-linguistic: The mod has no translatable localization text.
 - Large mods can take a long time. Validated entries are cached and reused after restarting.

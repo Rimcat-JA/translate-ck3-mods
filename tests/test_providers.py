@@ -155,7 +155,7 @@ class ProviderTests(unittest.TestCase):
 
                     provider = PROVIDERS[provider_id]
                     output = root / f"output-{provider_id}"
-                    with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+                    with patch("ck3_localize.urlopen_no_redirect", side_effect=fake_urlopen):
                         result = create_japanese_clone(
                             CloneOptions(
                                 source=source,

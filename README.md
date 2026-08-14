@@ -17,6 +17,7 @@ Local LLM mode is the default. Users may explicitly select OpenAI, OpenRouter, o
 - Display script-only mods as **Non-linguistic** and disable mods already written in the target language
 - Copy the complete source mod into CK3's local mod directory and replace only the selected source localization with the validated target localization
 - Select Local LLM, OpenAI, OpenRouter, NanoGPT pay-as-you-go, or NanoGPT subscription mode
+- Discover LM Studio models through its native v1, OpenAI-compatible, or legacy v0 model-list endpoint, with manual model identifiers as a fallback
 - Build the translated results into one standalone CK3 mod, launcher descriptor, manifest, and deterministic ZIP
 - Support Japanese and other user-selected target languages and `l_<locale>` headers
 - Protect CK3 syntax such as `$VALUE$`, `[Character.GetName]`, `#EMP`, `#!`, and `@icon!`
@@ -25,7 +26,7 @@ Local LLM mode is the default. Users may explicitly select OpenAI, OpenRouter, o
 - Instruct the model to translate adult/NSFW text faithfully without censorship or omission
 - Validate UTF-8 BOM, file counts, keys, tokens, physical newlines, placeholders, and encoding errors
 - Back up an existing localization outside `localization` before installation
-- Store optional API keys in Windows Credential Manager rather than settings, logs, manifests, or SQLite
+- Store optional API keys and local-server tokens in Windows Credential Manager rather than settings, logs, manifests, or SQLite
 - Allow remote keys only to each provider's exact official HTTPS endpoint
 - Use an LLM only for translation values; ordinary Python handles copying, validation, descriptors, manifests, and backups
 
@@ -33,10 +34,11 @@ Local LLM mode is the default. Users may explicitly select OpenAI, OpenRouter, o
 
 Download the release ZIP from [GitHub Releases](https://github.com/Rimcat-JA/translate-ck3-mods/releases/latest) and launch `CK3_Mod_Translator.exe`; Python and command-line work are not required.
 
-1. For local mode, load a model and start the LM Studio Local Server.
-2. Select **Auto-detect** for the source language and choose the target language.
-3. Scan CK3's mod folder, another mod library, an individual mod folder, or one or more `.mod` descriptors.
-4. Review the detected language and status, check the mods you want, and press **Translate Selected Mods**.
+1. For local mode, start the LM Studio Local Server. Load/import a model first, or enable LM Studio's Just-in-Time (JIT) model loading.
+2. Open **Advanced Settings** and press **Refresh Models**. Select a result or type the model identifier manually if the list is empty.
+3. Select **Auto-detect** for the source language and choose the target language.
+4. Scan CK3's mod folder, another mod library, an individual mod folder, or one or more `.mod` descriptors.
+5. Review the detected language and status, check the mods you want, and press **Translate Selected Mods**.
 
 The app writes the complete translated clone and launcher descriptor to:
 
@@ -47,7 +49,7 @@ Documents\Paradox Interactive\Crusader Kings III\mod\<source>_<TargetLanguage>.m
 
 The source is never modified. The scanner distinguishes actual text language from CK3 storage locale, so Japanese values placed beneath `l_english` are still reported as Japanese and cannot be selected for a Japanese target. In a generated clone, only the selected source/target localization files are replaced; scripts, assets, clothing, audio, and other files are byte-verified copies. Enable the clone instead of enabling it together with the original.
 
-Remote modes send localization text to the selected official provider and may incur charges. API keys can be encrypted in Windows Credential Manager. Settings, logs, and caches stay under `%LOCALAPPDATA%\CK3JapaneseModMaker`; the v1 directory name is retained so upgrades reuse existing settings and translation memory. Logs never contain API keys or translation text.
+Remote modes send localization text to the selected official provider and may incur charges. Remote API keys and LM Studio's optional local API token can be encrypted in Windows Credential Manager. The local token is needed only when **Require Authentication** is enabled in LM Studio. Settings, logs, and caches stay under `%LOCALAPPDATA%\CK3JapaneseModMaker`; the v1 directory name is retained so upgrades reuse existing settings and translation memory. Logs never contain API keys, tokens, or translation text.
 
 ## Requirements
 
@@ -59,6 +61,8 @@ Remote modes send localization text to the selected official provider and may in
 Python 3.10 or later is required only for source execution or building.
 
 The default endpoint is LM Studio's `http://127.0.0.1:1234/v1/chat/completions`. No model weights are included in this repository.
+
+**Refresh Models** derives the server address from that endpoint and supports LM Studio's `/api/v1/models`, OpenAI-compatible `/v1/models`, and legacy `/api/v0/models` responses. The model field remains editable, because JIT-enabled or third-party local servers may accept a valid model identifier even when their list endpoint is unavailable or empty.
 
 ## Recommended local LLM
 
@@ -219,6 +223,8 @@ Existing localization is moved outside CK3's localization loading tree:
 
 ## Troubleshooting
 
+- If **Refresh Models** returns no local models, confirm that LM Studio's Developer server is running and that the endpoint host and port match it. Then import/download a chat model and either load it or enable JIT loading. Refresh again; if discovery still returns nothing, paste the exact model identifier from LM Studio into the editable model field.
+- If LM Studio has **Require Authentication** enabled, enter its API token in Advanced Settings. Saving it is optional and uses Windows Credential Manager; the token is never written to the settings file or logs.
 - Reduce `--batch-items` and `--long-segment` when the model fails to preserve tokens.
 - Match `--workers` to the local server's configured parallel limit.
 - When a server rejects JSON Schema, the script automatically falls back to ordinary JSON output.
