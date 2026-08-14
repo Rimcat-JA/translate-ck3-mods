@@ -62,7 +62,7 @@ def save_api_key(provider_id: str, api_key: str) -> None:
     credential = CREDENTIALW()
     credential.Type = CRED_TYPE_GENERIC
     credential.TargetName = credential_target(provider_id)
-    credential.Comment = "CK3 Japanese Mod Maker API key"
+    credential.Comment = "CK3 Mod Translator API key"
     credential.CredentialBlobSize = len(encoded)
     credential.CredentialBlob = ctypes.cast(blob, ctypes.POINTER(ctypes.c_ubyte))
     credential.Persist = CRED_PERSIST_LOCAL_MACHINE

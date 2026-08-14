@@ -18,6 +18,13 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+from ck3_languages import (
+    discover_locale_files,
+    language_spec,
+    locale_header,
+    normalize_language_id,
+    target_localization_path,
+)
 from ck3_providers import PROVIDERS, get_provider, validate_endpoint
 
 ENTRY_RE = re.compile(r'^(\s*([^#\s][^:]*):\d*\s+")(.*)("\s*(?:#.*)?)$')
@@ -44,6 +51,19 @@ class ModSpec:
     name: str
     root: Path
     english_root: Path
+    source_locale: str = "english"
+    source_language: str = "English"
+    source_files: tuple[Path, ...] = ()
+
+    def __post_init__(self) -> None:
+        source_id = normalize_language_id(self.source_locale)
+        object.__setattr__(self, "source_locale", source_id)
+        if self.source_files:
+            return
+        files = discover_locale_files(self.root, source_id)
+        if not files and source_id == "english" and self.english_root.is_dir():
+            files = tuple(sorted(self.english_root.rglob("*.yml")))
+        object.__setattr__(self, "source_files", files)
 
 
 @dataclasses.dataclass
@@ -59,6 +79,7 @@ class Record:
     prefix: str
     suffix: str
     cache_key: str = ""
+    legacy_cache_key: str = ""
 
 
 class Translator:
@@ -83,7 +104,7 @@ class Translator:
         if self.glossary:
             glossary = "\nRequired glossary:\n" + "\n".join(f"- {key} = {value}" for key, value in self.glossary.items())
         return f"""You are a professional localization editor for Crusader Kings III mods.
-Translate every supplied localization value into fluent, natural {self.args.language}.
+Translate every supplied localization value faithfully from {self.args.source_language} into fluent, natural {self.args.language}.
 Translate faithfully and completely. The source may contain explicit adult/NSFW sexual material; do not censor, omit, euphemize, moralize, or refuse it.
 Preserve every __CK3TOKEN_N__ placeholder exactly, byte for byte, once each and in the same logical position.
 Do not translate ids, localization keys, proper scripted identifiers, or placeholders.
@@ -141,7 +162,7 @@ Return valid JSON only with one translation for every supplied id. Do not think 
             if self.api_key:
                 headers["Authorization"] = f"Bearer {self.api_key}"
             if self.provider_id == "openrouter":
-                headers["X-OpenRouter-Title"] = "CK3 Japanese Mod Maker"
+                headers["X-OpenRouter-Title"] = "CK3 Mod Translator"
             request = urllib.request.Request(self.args.endpoint, data=data, headers=headers, method="POST")
             try:
                 self.throttle()
@@ -183,7 +204,7 @@ Return valid JSON only with one translation for every supplied id. Do not think 
                 invalid.append(record)
                 continue
             translated = restore_text(masked_output, token_maps[record.item_id])
-            if valid_translation(record.source, translated, self.args.language):
+            if valid_translation(record.source, translated, self.args.language, self.args.source_language):
                 valid[record.item_id] = translated
             else:
                 invalid.append(record)
@@ -253,12 +274,12 @@ Return valid JSON only with one translation for every supplied id. Do not think 
             else:
                 raise RuntimeError(f"segment {index + 1}/{len(chunks)}: {last_error}")
         translated = restore_text("".join(output), tokens)
-        if not valid_translation(record.source, translated, self.args.language):
+        if not valid_translation(record.source, translated, self.args.language, self.args.source_language):
             raise RuntimeError("combined long translation failed validation")
         return translated
 
 
-def parse_mod(value: str) -> ModSpec:
+def parse_mod(value: str, source_locale: str = "l_english", source_language: str | None = None) -> ModSpec:
     if "=" in value:
         name, raw_path = value.split("=", 1)
     else:
@@ -270,19 +291,30 @@ def parse_mod(value: str) -> ModSpec:
     root = Path(raw_path).expanduser().resolve()
     if not root.is_dir():
         raise FileNotFoundError(root)
-    direct = root / "localization" / "english"
-    if direct.is_dir():
-        english = direct
-    elif root.name.lower() == "english" and root.parent.name.lower() == "localization":
-        english = root
+    source_id = normalize_language_id(source_locale)
+    if root.name.lower() == source_id and root.parent.name.lower() == "localization":
         root = root.parent.parent
+    elif (root / "localization").is_dir():
+        pass
     else:
-        candidates = [path for path in root.rglob("english") if path.parent.name.lower() == "localization"]
+        candidates = [
+            path.parent.parent
+            for path in root.rglob(source_id)
+            if path.is_dir() and path.parent.name.lower() == "localization"
+        ]
+        candidates = list(dict.fromkeys(candidates))
         if len(candidates) != 1:
-            raise RuntimeError(f"Expected one localization/english tree beneath {root}, found {len(candidates)}")
-        english = candidates[0]
-        root = english.parent.parent
-    return ModSpec(name=name, root=root, english_root=english)
+            raise RuntimeError(f"Expected one CK3 localization tree beneath {root}, found {len(candidates)}")
+        root = candidates[0]
+    files = discover_locale_files(root, source_id)
+    return ModSpec(
+        name=name,
+        root=root,
+        english_root=root / "localization" / "english",
+        source_locale=source_id,
+        source_language=source_language or language_spec(source_id).llm_name,
+        source_files=files,
+    )
 
 
 def require_loopback_endpoint(endpoint: str) -> None:
@@ -357,7 +389,7 @@ def token_counter(text: str) -> collections.Counter[str]:
 
 
 def target_script(language: str) -> re.Pattern[str] | None:
-    value = language.lower()
+    value = language.lower().replace("_", " ")
     if "japan" in value or "\u65e5\u672c" in value:
         return re.compile(r"[\u3040-\u30ff\u3400-\u9fff]")
     if "korean" in value or "\ud55c\uad6d" in value:
@@ -366,10 +398,23 @@ def target_script(language: str) -> re.Pattern[str] | None:
         return re.compile(r"[\u0400-\u04ff]")
     if "chinese" in value or "\u4e2d\u6587" in value:
         return re.compile(r"[\u3400-\u9fff]")
+    if any(
+        name in value
+        for name in (
+            "english", "french", "german", "spanish", "polish", "italian", "portuguese",
+            "turkish", "dutch", "czech", "hungarian",
+        )
+    ):
+        return re.compile(r"[A-Za-z\u00c0-\u024f\u1e00-\u1eff]")
     return None
 
 
-def valid_translation(source: str, translated: str, language: str) -> bool:
+def valid_translation(
+    source: str,
+    translated: str,
+    language: str,
+    source_language: str | None = None,
+) -> bool:
     if not translated or token_counter(source) != token_counter(translated):
         return False
     if "\ufffd" in translated or "__CK3TOKEN_" in translated or "\n" in translated or "\r" in translated:
@@ -383,16 +428,27 @@ def valid_translation(source: str, translated: str, language: str) -> bool:
     prose_source = TOKEN_RE.sub("", source)
     prose_target = TOKEN_RE.sub("", translated)
     ascii_letters = len(re.findall(r"[A-Za-z]", prose_source))
+    source_letters = sum(character.isalpha() for character in prose_source)
     script = target_script(language)
-    if script and ascii_letters >= 3 and not script.search(prose_target):
+    if script and source_letters >= 3 and not script.search(prose_target):
         return False
     copied_source = re.sub(r"\s+", " ", prose_source).strip().casefold()
     copied_target = re.sub(r"\s+", " ", prose_target).strip().casefold()
-    if ascii_letters >= 12 and len(copied_source) >= 12 and copied_source in copied_target:
+    different_languages = source_language is None or source_language.strip().casefold() != language.strip().casefold()
+    if different_languages and source_letters >= 8 and len(copied_source) >= 8 and copied_source in copied_target:
         return False
     if ("japan" in language.lower() or "\u65e5\u672c" in language.lower()) and SIMPLIFIED_ONLY_RE.search(prose_target):
         return False
-    return not (ascii_letters >= 6 and prose_source.strip() == prose_target.strip() and "english" not in language.lower())
+    if different_languages and source_letters >= 4 and copied_source == copied_target:
+        return False
+    # Keep the stricter version-1 Japanese check for direct callers that do
+    # not yet supply a source language.
+    return not (
+        source_language is None
+        and ascii_letters >= 6
+        and prose_source.strip() == prose_target.strip()
+        and "english" not in language.lower()
+    )
 
 
 def split_long(text: str, limit: int) -> list[str]:
@@ -419,32 +475,60 @@ def load_glossary(path: str | None) -> dict[str, str]:
     return data
 
 
-def make_cache_key(record: Record, model: str, language: str, locale: str, provider: str = "local") -> str:
-    payload = f"{provider}\0{model}\0{language}\0{locale}\0{record.mod}\0{record.relative_file}\0{record.key}\0{record.source}"
+def make_cache_key(
+    record: Record,
+    model: str,
+    language: str,
+    locale: str,
+    provider: str = "local",
+    source_language: str | None = None,
+    source_locale: str | None = None,
+) -> str:
+    source_prefix = "" if source_language is None and source_locale is None else f"{source_language or ''}\0{source_locale or ''}\0"
+    payload = (
+        f"{source_prefix}{provider}\0{model}\0{language}\0{locale}\0{record.mod}\0"
+        f"{record.relative_file}\0{record.key}\0{record.source}"
+    )
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
-def collect_records(mods: list[ModSpec], output: Path, locale: str, model: str, language: str, provider: str = "local") -> tuple[list[Record], dict[Path, list[str]]]:
+def collect_records(
+    mods: list[ModSpec],
+    output: Path,
+    locale: str,
+    model: str,
+    language: str,
+    provider: str = "local",
+) -> tuple[list[Record], dict[Path, list[str]]]:
     records: list[Record] = []
     destinations: dict[Path, list[str]] = {}
     serial = 0
-    suffix = locale_id(locale)
+    target_id = normalize_language_id(locale)
+    target_header = locale_header(target_id)
     for mod in mods:
-        for source_file in sorted(mod.english_root.rglob("*.yml")):
-            relative = source_file.relative_to(mod.english_root)
+        for source_file in mod.source_files:
+            relative = source_file.relative_to(mod.root)
             lines = source_file.read_text(encoding="utf-8-sig").splitlines()
-            has_header = bool(lines and lines[0].strip() == "l_english:")
-            output_lines = list(lines) if has_header else [f"{locale}:", *lines]
-            if has_header:
-                output_lines[0] = f"{locale}:"
-            output_name = relative.name.replace("_l_english.yml", f"_l_{suffix}.yml")
-            if output_name == relative.name:
-                output_name = relative.stem + f"_l_{suffix}.yml"
-            destination = output / mod.name / "localization" / suffix / relative.with_name(output_name)
+            header_index = next(
+                (index for index, line in enumerate(lines) if re.fullmatch(r"\s*l_[a-z0-9_]+\s*:\s*", line, re.IGNORECASE)),
+                None,
+            )
+            output_lines = list(lines) if header_index is not None else [f"{target_header}:", *lines]
+            if header_index is not None:
+                output_lines[header_index] = f"{target_header}:"
+            destination = target_localization_path(
+                source_file,
+                mod.root,
+                output / mod.name,
+                mod.source_locale,
+                target_id,
+            )
+            if destination in destinations:
+                raise RuntimeError(f"Multiple source files map to the same target: {destination}")
             destinations[destination] = output_lines
-            offset = 0 if has_header else 1
+            offset = 0 if header_index is not None else 1
             for line_index, line in enumerate(lines):
-                if has_header and line_index == 0:
+                if header_index is not None and line_index == header_index:
                     continue
                 match = ENTRY_RE.match(line)
                 broken = False
@@ -459,7 +543,29 @@ def collect_records(mods: list[ModSpec], output: Path, locale: str, model: str, 
                     destination=destination, output_lines=output_lines, output_index=line_index + offset,
                     prefix=match.group(1), suffix='"' if broken else match.group(4),
                 )
-                record.cache_key = make_cache_key(record, model, language, locale, provider)
+                record.cache_key = make_cache_key(
+                    record,
+                    model,
+                    language,
+                    target_header,
+                    provider,
+                    mod.source_language,
+                    locale_header(mod.source_locale),
+                )
+                # Version 1 caches can be reused for the original
+                # English-to-Japanese direct-directory workflow.
+                if mod.source_locale == "english":
+                    try:
+                        legacy_relative = source_file.relative_to(mod.english_root).as_posix()
+                    except ValueError:
+                        pass
+                    else:
+                        original_relative = record.relative_file
+                        record.relative_file = legacy_relative
+                        record.legacy_cache_key = make_cache_key(
+                            record, model, language, target_header, provider
+                        )
+                        record.relative_file = original_relative
                 records.append(record)
                 serial += 1
     return records, destinations
@@ -534,22 +640,25 @@ def validate_staged(mods: list[ModSpec], output: Path, language: str, locale: st
     errors: list[str] = []
     files = 0
     entries_count = 0
-    suffix = locale_id(locale)
+    target_id = normalize_language_id(locale)
+    target_header = locale_header(target_id)
     for mod in mods:
-        for source_file in sorted(mod.english_root.rglob("*.yml")):
+        for source_file in mod.source_files:
             files += 1
-            relative = source_file.relative_to(mod.english_root)
-            output_name = relative.name.replace("_l_english.yml", f"_l_{suffix}.yml")
-            if output_name == relative.name:
-                output_name = relative.stem + f"_l_{suffix}.yml"
-            target = output / mod.name / "localization" / suffix / relative.with_name(output_name)
+            target = target_localization_path(
+                source_file,
+                mod.root,
+                output / mod.name,
+                mod.source_locale,
+                target_id,
+            )
             if not target.is_file():
                 errors.append(f"Missing target file: {target}")
                 continue
             if not target.read_bytes().startswith(b"\xef\xbb\xbf"):
                 errors.append(f"Missing UTF-8 BOM: {target}")
             lines = target.read_text(encoding="utf-8-sig").splitlines()
-            if not lines or lines[0].strip() != f"{locale}:":
+            if not any(line.strip() == f"{target_header}:" for line in lines):
                 errors.append(f"Wrong header: {target}")
             try:
                 source_entries = parse_entries(source_file, allow_broken=True)
@@ -561,7 +670,7 @@ def validate_staged(mods: list[ModSpec], output: Path, language: str, locale: st
             if set(source_entries) != set(target_entries):
                 errors.append(f"Key mismatch: {target}")
             for key in set(source_entries) & set(target_entries):
-                if not valid_translation(source_entries[key], target_entries[key], language):
+                if not valid_translation(source_entries[key], target_entries[key], language, mod.source_language):
                     errors.append(f"Invalid translation: {target}:{key}")
     actual_files = sum(len(list((output / mod.name).rglob("*.yml"))) for mod in mods)
     if actual_files != files:
@@ -584,7 +693,11 @@ def translate_records(
     pending: list[Record] = []
     for record in records:
         row = connection.execute("SELECT translated FROM translations WHERE cache_key=?", (record.cache_key,)).fetchone()
-        if row and valid_translation(record.source, row[0], args.language):
+        if row is None and record.legacy_cache_key:
+            row = connection.execute(
+                "SELECT translated FROM translations WHERE cache_key=?", (record.legacy_cache_key,)
+            ).fetchone()
+        if row and valid_translation(record.source, row[0], args.language, args.source_language):
             translated[record.item_id] = row[0]
         else:
             pending.append(record)
@@ -647,7 +760,11 @@ def translate_records(
 
 
 def command_translate(args: argparse.Namespace) -> None:
-    mods = [parse_mod(value) for value in args.mod]
+    source_locale = getattr(args, "source_locale", "l_english")
+    source_language = getattr(args, "source_language", "English")
+    args.source_locale = source_locale
+    args.source_language = source_language
+    mods = [parse_mod(value, source_locale, source_language) for value in args.mod]
     output = Path(args.output).expanduser().resolve()
     records, destinations = collect_records(
         mods, output, args.locale, args.model, args.language, getattr(args, "provider", "local")
@@ -662,7 +779,9 @@ def command_translate(args: argparse.Namespace) -> None:
 
 
 def command_validate(args: argparse.Namespace) -> None:
-    mods = [parse_mod(value) for value in args.mod]
+    source_locale = getattr(args, "source_locale", "l_english")
+    source_language = getattr(args, "source_language", "English")
+    mods = [parse_mod(value, source_locale, source_language) for value in args.mod]
     validate_staged(mods, Path(args.output).expanduser().resolve(), args.language, args.locale)
     print("VALIDATION PASSED")
 
@@ -711,6 +830,8 @@ def add_source_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--output", required=True, help="staging output root")
     parser.add_argument("--language", required=True, help="human language name, for example Japanese")
     parser.add_argument("--locale", required=True, help="CK3 locale header, for example l_japanese")
+    parser.add_argument("--source-language", default="English", help="actual language of the source text")
+    parser.add_argument("--source-locale", default="l_english", help="CK3 locale/header containing the source text")
 
 
 def build_parser() -> argparse.ArgumentParser:

@@ -78,6 +78,8 @@ def build_commands(config_path: Path) -> tuple[list[str], list[str]]:
         "--endpoint", str(translation["endpoint"]),
         "--model", str(translation["model"]),
     ])
+    for key in ("source_language", "source_locale"):
+        append_option(translate, translation, key)
     for key in ("workers", "batch_items", "batch_chars", "long_threshold", "long_segment", "retries", "timeout", "max_tokens", "temperature", "min_interval", "api_key_env"):
         append_option(translate, translation, key)
     for key in ("glossary", "extra_instructions"):

@@ -8,6 +8,8 @@
     ],
     "staging_output": "C:\\work\\ck3-ja-staging",
     "cache": "C:\\work\\ck3-ja.sqlite",
+    "source_language": "English",
+    "source_locale": "l_english",
     "language": "Japanese",
     "locale": "l_japanese",
     "endpoint": "http://127.0.0.1:1234/v1/chat/completions",

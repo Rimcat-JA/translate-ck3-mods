@@ -2,15 +2,20 @@
 
 [English](README.md) | **日本語**
 
-フォルダを選ぶだけでCrusader Kings III（CK3）MODの完全な日本語化コピーを作るWindowsアプリ兼、Codex／Claude Code互換スキルです。
+Crusader Kings III（CK3）のMOD保管フォルダを走査し、各MODで実際に使われている言語を自動検出して、選択した翻訳先言語の完全コピーを作るWindowsアプリ兼Codex／Claude Code互換スキルです。
 
 既定ではLM StudioなどのローカルLLMを利用します。高品質な翻訳が必要な場合はOpenAI、OpenRouter、NanoGPT（従量課金／サブスクリプション）もGUIから明示的に選択できます。翻訳結果はSQLiteへ逐次保存され、長いMODでも中断・再開できます。
 
 ## 主な機能
 
 - 複数のCK3 MODを一括翻訳
-- Windows用GUI：MODフォルダを選択してボタンを押すだけ
-- 元MOD全体をCK3ローカルMODフォルダへ複製し、英語ローカライズを検証済み日本語へ置換
+- 英語表記のWindows GUIで、翻訳元言語と翻訳先言語をそれぞれ指定
+- CK3のMODフォルダ全体または別の保管フォルダを走査し、チェックリストから個別MODを選択
+- 個別のMODフォルダや外部`.mod`ランチャーdescriptorも追加可能
+- descriptorのパス解決とCK3フォルダ構造検証を行い、不正な候補を選択不可にする
+- 本文から英語・日本語・ロシア語・中国語・韓国語・複数の欧州言語を自動検出
+- 文章を持たないスクリプト専用MODを「Non-linguistic」と表示し、翻訳先と同じ言語のMODも選択不可にする
+- 元MOD全体をCK3ローカルMODフォルダへ複製し、選択した翻訳元ローカライズだけを検証済みの翻訳先へ置換
 - ローカルLLM／OpenAI／OpenRouter／NanoGPTを画面で選択
 - 翻訳結果を単一の独立CK3 MOD、ランチャー用descriptor、manifest、再現可能なZIPへ自動統合
 - 日本語を含む任意の翻訳先言語と`l_<locale>`ヘッダーに対応
@@ -26,34 +31,35 @@
 
 ## EXEですぐ使う
 
-[GitHub Releases](https://github.com/Rimcat-JA/translate-ck3-mods/releases/latest)から配布ZIPをダウンロードし、`CK3_Japanese_Mod_Maker.exe`を起動します。Pythonやコマンド操作は不要です。
+[GitHub Releases](https://github.com/Rimcat-JA/translate-ck3-mods/releases/latest)から配布ZIPをダウンロードし、`CK3_Mod_Translator.exe`を起動します。Pythonやコマンド操作は不要です。
 
 1. ローカルLLMを使う場合は、LM Studioでモデルを読み込みLocal Serverを開始します。
-2. アプリで翻訳方式を選びます。既定は「ローカルLLM」です。
-3. 「フォルダを選択…」で展開済みのCK3 MODを指定します。
-4. 「日本語化MODを作成」を押します。
+2. 翻訳元は「Auto-detect」、翻訳先は希望する言語を選びます。
+3. CK3のMODフォルダ、別の保管フォルダ、個別MODフォルダ、または`.mod`ファイルを読み込みます。
+4. 検出言語と状態を確認して対象にチェックを付け、「Translate Selected Mods」を押します。
 
 生成物は既定で次へ配置され、CK3ランチャーからすぐ選択できます。
 
 ```text
-Documents\Paradox Interactive\Crusader Kings III\mod\<元MOD名>_Japanese
-Documents\Paradox Interactive\Crusader Kings III\mod\<元MOD名>_Japanese.mod
+Documents\Paradox Interactive\Crusader Kings III\mod\<元MOD名>_<翻訳先言語>
+Documents\Paradox Interactive\Crusader Kings III\mod\<元MOD名>_<翻訳先言語>.mod
 ```
 
-元MODは変更されません。生成版では`localization/english`を取り除き、検証済みの`localization/japanese`へ置換します。スクリプト、衣装、画像、音声など、それ以外のファイルはハッシュ比較により完全コピーを確認します。ランチャーでは生成版だけを有効にし、同じ元MODを同時に有効化しないでください。
+元MODは変更されません。格納先の`l_english`などと実際の本文言語を分けて判定するため、英語用ファイルに日本語本文が入っているMODも「Japanese」と表示され、日本語への再翻訳はできません。生成版では選択した翻訳元・翻訳先ローカライズだけを置換し、スクリプト、衣装、画像、音声などはハッシュ比較により完全コピーを確認します。ランチャーでは生成版だけを有効にし、同じ元MODを同時に有効化しないでください。
 
 ### API方式と保存場所
 
-- ローカルLLM：英文をPC外へ送信せず、API料金も発生しません。
-- OpenAI／OpenRouter／NanoGPT：英文を選択サービスの公式APIへ送信し、料金が発生する場合があります。開始前に確認画面を表示します。
+- ローカルLLM：翻訳元本文をPC外へ送信せず、API料金も発生しません。
+- OpenAI／OpenRouter／NanoGPT：翻訳元本文を選択サービスの公式APIへ送信し、料金が発生する場合があります。開始前に確認画面を表示します。
 - APIキー：保存を有効にした場合、Windows資格情報マネージャーへ暗号化保存します。
-- 設定・ログ・キャッシュ：`%LOCALAPPDATA%\CK3JapaneseModMaker`だけに保存し、自動アップロードしません。
+- 設定・ログ・キャッシュ：`%LOCALAPPDATA%\CK3JapaneseModMaker`だけに保存し、自動アップロードしません。v1の設定と翻訳キャッシュを再利用できるよう、保存先名は互換性のため維持しています。
 - ログにはAPIキーと翻訳本文を記録しません。
 
 ## 必要なもの
 
 - Windows 10／11（配布EXEを使う場合）
-- 翻訳対象MODの展開済みフォルダ
+- `descriptor.mod`を持つ展開済みCK3 MOD、またはそこへ解決できる外部`.mod`ファイル
+- 翻訳するMODには認識可能なロケールの自然言語YML
 - ローカルLLMサーバー、または選択したAPIサービスのキー
 
 ソースから実行・ビルドする場合だけPython 3.10以降が必要です。
@@ -117,11 +123,17 @@ PyInstallerとPillowを導入したWindows環境で次を実行します。
 .\build_exe.ps1
 ```
 
-`dist/CK3_Japanese_Mod_Maker.exe`、SHA256ファイル、説明書入り配布ZIPが生成されます。
+`dist/CK3_Mod_Translator.exe`、SHA256ファイル、英語・日本語説明書入り配布ZIPが生成されます。
 
 ## CLIの使用例
 
-### 1つのMODを完全コピーして日本語化
+### MOD保管フォルダをモデルに接続せず検査
+
+```powershell
+python scripts/ck3_mod_scanner.py "C:\path\to\Crusader Kings III\mod"
+```
+
+### 1つのMODを完全コピーして翻訳
 
 ```powershell
 python scripts/ck3_clone.py "C:\path\to\Example Mod"
@@ -158,6 +170,8 @@ python scripts/ck3_localize.py translate `
   --mod "Example Mod=C:\path\to\Example Mod" `
   --output "C:\work\ck3-ja" `
   --cache "C:\work\ck3-ja.sqlite" `
+  --source-language English `
+  --source-locale l_english `
   --language Japanese `
   --locale l_japanese `
   --endpoint http://127.0.0.1:1234/v1/chat/completions `
@@ -189,6 +203,8 @@ python scripts/ck3_localize.py translate ... --glossary "C:\work\glossary.json"
 python scripts/ck3_localize.py validate `
   --mod "Example Mod=C:\path\to\Example Mod" `
   --output "C:\work\ck3-ja" `
+  --source-language English `
+  --source-locale l_english `
   --language Japanese `
   --locale l_japanese
 ```
@@ -215,6 +231,7 @@ python scripts/ck3_localize.py install `
 - ローカルモデルの同時処理数に合わせて`--workers`を調整します。
 - モデルがJSON Schemaを受け付けない場合、スクリプトは通常のJSON出力へ自動的にフォールバックします。
 - 未完項目が残っても成功済み翻訳はSQLiteに保存されています。同じコマンドを再実行してください。
+- 自動判定の信頼度が低いMODは自動選択されません。内容を確認して翻訳元言語を明示してください。
 - バックアップを`localization`配下へ置かないでください。CK3が旧訳も読み込む可能性があります。
 
 詳しい手順は[SKILL.md](SKILL.md)、CK3固有の検証規則は[references/ck3-localization.md](references/ck3-localization.md)を参照してください。
@@ -227,8 +244,10 @@ README.ja.md                    日本語ドキュメント
 SKILL.md                         エージェント用ワークフロー
 agents/openai.yaml              Codex用UIメタデータ
 scripts/ck3_localize.py         翻訳・検証・導入CLI
-scripts/ck3_clone.py            完全コピー型の単一MOD日本語化エンジン
+scripts/ck3_clone.py            完全コピー型の単一MOD翻訳エンジン
 scripts/ck3_gui.py              Windows GUIエントリーポイント
+scripts/ck3_mod_scanner.py      descriptor・構造・実言語スキャナー
+scripts/ck3_languages.py        CK3ロケール定義・パス変換
 scripts/ck3_providers.py        APIプロバイダー許可リスト
 scripts/windows_credentials.py  Windows資格情報マネージャー連携
 scripts/ck3_pipeline.py         ローカル翻訳からパッケージ化までの一括処理

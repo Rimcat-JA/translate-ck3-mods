@@ -1,10 +1,13 @@
 # CK3 localization rules
 
-## File layout
+## File layout and language discovery
 
-- Source files normally live under `<mod>/localization/english/**/*.yml`.
-- Place a Japanese translation under `<mod>/localization/japanese/**/<name>_l_japanese.yml` and use `l_japanese:` as the first line.
-- Preserve relative subdirectories. Some mods omit the English header or contain a small number of malformed closing quotes; repair the generated target without rewriting the source archive.
+- Localization may live under `<mod>/localization/<language>/**/*.yml`, `<mod>/localization/replace/<language>/**/*.yml`, `<mod>/localization/<language>/replace/**/*.yml`, or framework-specific directories such as `replace/clausewitz`.
+- Discover the stored locale from the first `l_<locale>:` header, then the `_l_<locale>.yml` suffix, then a recognized language path segment. Do not assume every source is English.
+- Detect the natural language of localization values separately from the stored locale. A file headed `l_english:` can contain Japanese, and the actual text language must prevent accidental Japanese-to-Japanese retranslation.
+- A valid mod with no natural-language localization is `Non-linguistic`; do not call an LLM for it. Missing or unresolved descriptors, archives, and malformed mod roots are invalid rather than translation candidates.
+- Place a translation under the corresponding target-language path, rename `_l_<source>.yml` to `_l_<target>.yml`, and use `l_<target>:` as the first line.
+- Preserve relative subdirectories other than recognized language components. Some mods omit the source header or contain a small number of malformed closing quotes; repair the generated target without rewriting the source archive.
 - CK3 expects UTF-8 with BOM.
 
 ## Protected syntax
@@ -25,7 +28,7 @@ Mask protected syntax before asking a model to translate. Reject output when pla
 - Compare source and target file sets and key sets exactly.
 - Reject replacement characters, internal model placeholders, Markdown fences, JSON fragments, and physical CR/LF characters inside a localization value.
 - Reject a single kana or letter repeated more than 20 times. Compact source vocalizations before translation.
-- For Japanese, require kana or CJK in prose translated from English and reject unmistakable Simplified Chinese characters. Do not reject Japanese kanji such as `将` merely because Chinese also uses them.
+- Apply target-aware validation. For Japanese, require kana or CJK in translated prose and reject unmistakable Simplified Chinese characters. For a non-Latin source translated into a Latin-script language, reject unchanged source-script output.
 - Allow ASCII in proper names, debug variable names, mod acronyms, and scripted tokens.
 - Spot-check titles, descriptions, options, game concepts, and long events. A syntactically valid translation can still use inconsistent terminology.
 
@@ -35,7 +38,7 @@ Mask protected syntax before asking a model to translate. Reject output when pla
 2. Confirm the target is strictly inside the intended mod root.
 3. Move an existing locale directory to `<mod>/_translation_backups/<locale>_<timestamp>`.
 4. Copy the staged locale directory into `<mod>/localization/<locale>`.
-5. Validate the installed files against the English source.
+5. Validate the installed files against the selected source-locale files.
 
 Keep backups outside `localization` to prevent duplicate keys.
 

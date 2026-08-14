@@ -21,7 +21,7 @@ class ProviderSpec:
 
 PROVIDERS: dict[str, ProviderSpec] = {
     "local": ProviderSpec(
-        "local", "ローカルLLM（無料・PC内のみ）",
+        "local", "Local LLM (Free, on-device)",
         "http://127.0.0.1:1234/v1/chat/completions",
         "http://127.0.0.1:1234/v1/models",
         False, False,
@@ -39,13 +39,13 @@ PROVIDERS: dict[str, ProviderSpec] = {
         True, True,
     ),
     "nanogpt": ProviderSpec(
-        "nanogpt", "NanoGPT API（従量課金）",
+        "nanogpt", "NanoGPT API (Pay-as-you-go)",
         "https://nano-gpt.com/api/v1/chat/completions",
         "https://nano-gpt.com/api/v1/models",
         True, True,
     ),
     "nanogpt_subscription": ProviderSpec(
-        "nanogpt_subscription", "NanoGPT API（サブスクリプション）",
+        "nanogpt_subscription", "NanoGPT API (Subscription)",
         "https://nano-gpt.com/api/subscription/v1/chat/completions",
         "https://nano-gpt.com/api/v1/models",
         True, True,
@@ -87,7 +87,7 @@ def validate_endpoint(provider_id: str, endpoint: str) -> None:
         or parsed.username
         or parsed.password
     ):
-        raise ValueError(f"{provider.label}のAPIキーは公式エンドポイント以外へ送信できません: {provider.chat_endpoint}")
+        raise ValueError(f"{provider.label} API keys may be sent only to the official endpoint: {provider.chat_endpoint}")
 
 
 def models_endpoint(provider_id: str, chat_endpoint: str) -> str:

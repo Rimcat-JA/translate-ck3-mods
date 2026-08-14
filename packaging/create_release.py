@@ -25,20 +25,24 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--exe", required=True)
     parser.add_argument("--guide", required=True)
-    parser.add_argument("--version", default="1.0.0")
+    parser.add_argument("--guide-ja")
+    parser.add_argument("--version", default="2.0.0")
     args = parser.parse_args()
     executable = Path(args.exe).resolve()
     guide = Path(args.guide).resolve()
-    if not executable.is_file() or not guide.is_file():
+    guide_ja = Path(args.guide_ja).resolve() if args.guide_ja else None
+    if not executable.is_file() or not guide.is_file() or (guide_ja and not guide_ja.is_file()):
         raise FileNotFoundError("Executable or guide is missing")
     digest = sha256(executable)
     checksum = executable.with_suffix(".sha256.txt")
     checksum.write_text(f"{digest}  {executable.name}\n", encoding="ascii", newline="\n")
-    archive_path = executable.parent / f"CK3_Japanese_Mod_Maker_v{args.version}.zip"
-    prefix = f"CK3_Japanese_Mod_Maker_v{args.version}"
+    archive_path = executable.parent / f"CK3_Mod_Translator_v{args.version}.zip"
+    prefix = f"CK3_Mod_Translator_v{args.version}"
     with zipfile.ZipFile(archive_path, "w") as archive:
         add_bytes(archive, f"{prefix}/{executable.name}", executable.read_bytes())
-        add_bytes(archive, f"{prefix}/使い方.txt", guide.read_bytes())
+        add_bytes(archive, f"{prefix}/Quick_Start.txt", guide.read_bytes())
+        if guide_ja:
+            add_bytes(archive, f"{prefix}/使い方.txt", guide_ja.read_bytes())
         add_bytes(archive, f"{prefix}/{checksum.name}", checksum.read_bytes())
     print(f"Release ZIP: {archive_path}")
     print(f"SHA256: {digest}")
