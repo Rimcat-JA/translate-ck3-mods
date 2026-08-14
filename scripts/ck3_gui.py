@@ -12,6 +12,7 @@ import re
 import sys
 import threading
 import tkinter as tk
+import urllib.parse
 from collections.abc import Callable, Iterable
 from pathlib import Path
 from tkinter import filedialog, messagebox, scrolledtext, ttk
@@ -25,11 +26,11 @@ from ck3_mod_scanner import (
     scan_mod_folder,
     scan_mod_library,
 )
-from ck3_providers import PROVIDERS, get_provider
+from ck3_providers import PROVIDERS, get_provider, validate_endpoint
 from windows_credentials import delete_api_key, load_api_key, save_api_key
 
 APP_NAME = "CK3 Mod Translator"
-APP_VERSION = "2.0.0"
+APP_VERSION = "2.0.1"
 DEFAULT_ENDPOINT = "http://127.0.0.1:1234/v1/chat/completions"
 AUTO_LANGUAGE_LABEL = "Auto-detect (Recommended)"
 PROVIDER_DISPLAY = {
@@ -73,6 +74,76 @@ def _safe_output_suffix(display_name: str) -> str:
     return re.sub(r"[^A-Za-z0-9_-]+", "_", display_name).strip("_") or "Translation"
 
 
+def validate_user_endpoint(provider_id: str, endpoint: str) -> None:
+    """Validate an endpoint at the UI boundary before persistence or requests."""
+    validate_endpoint(provider_id, endpoint)
+    if provider_id != "local":
+        return
+    parsed = urllib.parse.urlsplit(endpoint)
+    if parsed.username or parsed.password or parsed.query or parsed.fragment:
+        raise ValueError("Local endpoint URLs cannot contain credentials, queries, or fragments")
+
+
+def safe_local_endpoint(candidate: object) -> str:
+    """Return only a persistable, credential-free local endpoint."""
+    endpoint = str(candidate).strip() or DEFAULT_ENDPOINT
+    try:
+        validate_user_endpoint("local", endpoint)
+    except ValueError:
+        return DEFAULT_ENDPOINT
+    return endpoint
+
+
+def endpoint_error_message(provider_id: str) -> str:
+    """Describe endpoint requirements without echoing possibly secret input."""
+    if provider_id == "local":
+        return (
+            "Use a loopback OpenAI-compatible endpoint such as "
+            f"{DEFAULT_ENDPOINT}. Do not put a username, password, query string, or fragment in the URL. "
+            "Enter an optional server token in its separate credential field."
+        )
+    return "Use the official endpoint shown for the selected remote provider."
+
+
+def local_server_error_message(message: str, endpoint: str = DEFAULT_ENDPOINT) -> str:
+    """Turn low-level local-server errors into an actionable LM Studio hint."""
+    lowered = message.casefold()
+    if any(marker in lowered for marker in ("401", "403", "unauthorized", "forbidden")):
+        return (
+            "LM Studio rejected the request. If server authentication is enabled, enter its API token "
+            "above and click Refresh Models. The token is optional when authentication is disabled."
+        )
+    if "404" in lowered or "not found" in lowered:
+        return (
+            "The local server was reached, but no supported model-list endpoint was found "
+            "(/api/v1/models, /v1/models, or /api/v0/models). "
+            f"Check the endpoint ({endpoint}) and server version. You may still type the exact model ID manually."
+        )
+    if any(marker in lowered for marker in ("timed out", "timeout")):
+        return (
+            "The local server timed out. Wait for the model to finish loading in LM Studio, keep the "
+            "Local Server running, and click Refresh Models again."
+        )
+    if any(
+        marker in lowered
+        for marker in (
+            "connection refused",
+            "failed to establish",
+            "no connection could be made",
+            "urlopen error",
+            "winerror 10061",
+        )
+    ):
+        return (
+            "LM Studio Local Server is not reachable. In LM Studio, load a model, open Developer, and "
+            "start the Local Server. Then check the endpoint and click Refresh Models."
+        )
+    return (
+        "Could not query the local server. Confirm that an OpenAI-compatible server is running, check "
+        "the endpoint and optional token, then click Refresh Models. You may also type the exact model ID manually."
+    )
+
+
 class CK3ModTranslator:
     """Tk application that discovers, classifies, and translates multiple CK3 mods."""
 
@@ -94,13 +165,17 @@ class CK3ModTranslator:
         local_today = dt.datetime.now(dt.timezone.utc).astimezone().date()
         self.log_path = _default_work_root() / "logs" / f"{local_today.isoformat()}.log"
 
-        settings = self.load_settings()
+        # Smoke tests and embedders that disable persistence must not inherit a
+        # previous interactive session's provider, language, model, or endpoint.
+        settings = self.load_settings() if auto_connect else {}
         initial_provider = str(settings.get("provider", "local"))
         if initial_provider not in PROVIDERS:
             initial_provider = "local"
         self.active_provider = initial_provider
         raw_models = settings.get("models", {})
         self.models_by_provider = dict(raw_models) if isinstance(raw_models, dict) else {}
+        self.available_models_by_provider: dict[str, list[str]] = {}
+        self.api_keys_by_provider: dict[str, str] = {}
         default_library = _ck3_mod_directory()
         self.library_var = tk.StringVar(value=str(settings.get("last_library", default_library or "")))
         self.source_var = self.library_var  # v1 compatibility
@@ -118,7 +193,7 @@ class CK3ModTranslator:
         self.provider_var = tk.StringVar(value=PROVIDER_DISPLAY.get(initial_provider, get_provider(initial_provider).label))
         self.api_key_var = tk.StringVar(value="")
         self.remember_key_var = tk.BooleanVar(value=True)
-        self.local_endpoint = str(settings.get("local_endpoint", DEFAULT_ENDPOINT))
+        self.local_endpoint = safe_local_endpoint(settings.get("local_endpoint", DEFAULT_ENDPOINT))
         endpoint = self.local_endpoint if initial_provider == "local" else get_provider(initial_provider).chat_endpoint
         self.endpoint_var = tk.StringVar(value=endpoint)
         self.model_var = tk.StringVar(value=str(self.models_by_provider.get(initial_provider, "")))
@@ -386,7 +461,7 @@ class CK3ModTranslator:
         )
         self.remember_key_check.grid(row=2, column=1, columnspan=2, sticky="w", pady=(0, 4))
         ttk.Label(self.advanced, text="Translation model").grid(row=3, column=0, sticky="w", padx=(0, 10), pady=4)
-        self.model_combo = ttk.Combobox(self.advanced, textvariable=self.model_var, state="readonly")
+        self.model_combo = ttk.Combobox(self.advanced, textvariable=self.model_var, state="normal")
         self.model_combo.grid(row=3, column=1, columnspan=2, sticky="ew", pady=4)
         ttk.Label(self.advanced, text="Parallel requests").grid(row=4, column=0, sticky="w", padx=(0, 10), pady=4)
         self.workers_spin = ttk.Spinbox(self.advanced, from_=1, to=8, textvariable=self.workers_var, width=8)
@@ -404,7 +479,14 @@ class CK3ModTranslator:
             text="One translated mod folder and one launcher .mod file are created per selected mod.",
             foreground="#5e6b7a",
         ).grid(row=6, column=1, columnspan=2, sticky="w", pady=(0, 4))
-        ttk.Label(self.advanced, textvariable=self.server_var, foreground="#45627d").grid(
+        self.server_status_label = ttk.Label(
+            self.advanced,
+            textvariable=self.server_var,
+            foreground="#45627d",
+            wraplength=680,
+            justify="left",
+        )
+        self.server_status_label.grid(
             row=7,
             column=0,
             columnspan=3,
@@ -431,10 +513,11 @@ class CK3ModTranslator:
             self.models_by_provider[self.active_provider] = self.model_var.get().strip()
             if self.active_provider == "local":
                 self.local_endpoint = self.endpoint_var.get().strip()
+            persistable_local_endpoint = safe_local_endpoint(self.local_endpoint)
             self.settings_path.parent.mkdir(parents=True, exist_ok=True)
             data = {
                 "provider": self.active_provider,
-                "local_endpoint": self.local_endpoint,
+                "local_endpoint": persistable_local_endpoint,
                 "models": self.models_by_provider,
                 "workers": workers,
                 "last_library": self.library_var.get().strip(),
@@ -454,10 +537,19 @@ class CK3ModTranslator:
     def provider_id(self) -> str:
         return PROVIDER_LABELS.get(self.provider_var.get(), "local")
 
+    def selected_model(self) -> str | None:
+        """Return a discovered or manually entered model ID without requiring discovery."""
+        return self.model_var.get().strip() or None
+
+    def current_api_key(self) -> str | None:
+        """Return the transient provider key/token; it is never written to settings."""
+        return self.api_key_var.get().strip() or None
+
     def apply_provider(self, initial: bool = False) -> None:
         previous = self.active_provider
         if not initial:
             self.models_by_provider[previous] = self.model_var.get().strip()
+            self.api_keys_by_provider[previous] = self.api_key_var.get()
             if previous == "local":
                 self.local_endpoint = self.endpoint_var.get().strip() or DEFAULT_ENDPOINT
         provider_id = self.provider_id()
@@ -465,20 +557,22 @@ class CK3ModTranslator:
         provider = get_provider(provider_id)
         self.models_verified = False
         self.model_var.set(str(self.models_by_provider.get(provider_id, "")))
-        self.model_combo.configure(values=[])
+        self.model_combo.configure(values=self.available_models_by_provider.get(provider_id, []), state="normal")
+        try:
+            saved = load_api_key(provider_id) if self.persistence_enabled else None
+        except OSError as exc:
+            saved = None
+            self.append_log(f"Credential read error: {exc}")
+        self.api_key_var.set(self.api_keys_by_provider.get(provider_id, saved or ""))
         if provider.remote:
             self.endpoint_var.set(provider.chat_endpoint)
             self.endpoint_entry.configure(state="readonly")
-            self.model_combo.configure(state="normal")
             self.provider_hint.configure(text="Localization text is sent to the selected service", foreground="#a05a22")
             for widget in (self.api_key_label, self.api_key_entry, self.delete_key_button, self.remember_key_check):
                 widget.grid()
-            try:
-                saved = load_api_key(provider_id) if self.persistence_enabled else None
-            except OSError as exc:
-                saved = None
-                self.append_log(f"Credential read error: {exc}")
-            self.api_key_var.set(saved or "")
+            self.api_key_label.configure(text="API key")
+            self.delete_key_button.configure(text="Delete Saved Key")
+            self.remember_key_check.configure(text="Save securely in Windows Credential Manager on this PC")
             self.server_var.set("Enter an API key and model, then click Refresh Models.")
             if not self.advanced_visible():
                 self.toggle_advanced()
@@ -487,25 +581,29 @@ class CK3ModTranslator:
         else:
             self.endpoint_var.set(self.local_endpoint or DEFAULT_ENDPOINT)
             self.endpoint_entry.configure(state="normal")
-            self.model_combo.configure(state="readonly")
             self.provider_hint.configure(text="Localization text stays on this PC", foreground="#3f7750")
             for widget in (self.api_key_label, self.api_key_entry, self.delete_key_button, self.remember_key_check):
-                widget.grid_remove()
-            self.api_key_var.set("")
-            self.server_var.set("Start the Local Server in LM Studio, then refresh models.")
+                widget.grid()
+            self.api_key_label.configure(text="Local server token (optional)")
+            self.delete_key_button.configure(text="Delete Saved Token")
+            self.remember_key_check.configure(text="Save token securely in Windows Credential Manager on this PC")
+            self.server_var.set(
+                "Load a model and start the Local Server in LM Studio, then click Refresh Models. "
+                "You can also type the exact model ID."
+            )
             if not initial:
                 self.refresh_models()
 
     def delete_saved_key(self) -> None:
         provider_id = self.provider_id()
-        if provider_id == "local":
-            return
         try:
             deleted = delete_api_key(provider_id)
             self.api_key_var.set("")
-            self.server_var.set("Saved API key deleted." if deleted else "No saved API key was found.")
+            self.api_keys_by_provider[provider_id] = ""
+            noun = "server token" if provider_id == "local" else "API key"
+            self.server_var.set(f"Saved {noun} deleted." if deleted else f"No saved {noun} was found.")
         except OSError as exc:
-            messagebox.showerror(APP_NAME, f"Could not delete the saved API key.\n\n{exc}")
+            messagebox.showerror(APP_NAME, f"Could not delete the saved credential.\n\n{exc}")
 
     def scan_default_library(self) -> None:
         folder = _ck3_mod_directory()
@@ -763,7 +861,7 @@ class CK3ModTranslator:
             return
         provider_id = self.provider_id()
         provider = get_provider(provider_id)
-        api_key = self.api_key_var.get().strip() or None
+        api_key = self.current_api_key()
         if provider.requires_key and not api_key:
             self.server_var.set("Enter an API key first.")
             self.api_key_entry.focus_set()
@@ -772,6 +870,17 @@ class CK3ModTranslator:
         self.server_var.set(f"Connecting to {PROVIDER_DISPLAY.get(provider_id, provider.label)}…")
         self.refresh_button.configure(state="disabled")
         endpoint = self.endpoint_var.get().strip()
+        try:
+            validate_user_endpoint(provider_id, endpoint)
+        except ValueError:
+            self.server_var.set(endpoint_error_message(provider_id))
+            self.provider_hint.configure(
+                text="Invalid endpoint — open Advanced Settings",
+                foreground="#a05a22",
+            )
+            self.refresh_button.configure(state="normal")
+            self.endpoint_entry.focus_set()
+            return
 
         def work() -> None:
             try:
@@ -815,9 +924,27 @@ class CK3ModTranslator:
         provider_id = self.provider_id()
         provider = get_provider(provider_id)
         provider_name = PROVIDER_DISPLAY.get(provider_id, provider.label)
-        api_key = self.api_key_var.get().strip() or None
-        selected_model = self.model_var.get().strip() or None
+        api_key = self.current_api_key()
+        selected_model = self.selected_model()
         endpoint = self.endpoint_var.get().strip()
+        try:
+            validate_user_endpoint(provider_id, endpoint)
+        except ValueError:
+            if not self.advanced_visible():
+                self.toggle_advanced()
+            self.server_var.set(endpoint_error_message(provider_id))
+            self.provider_hint.configure(
+                text="Invalid endpoint — no settings or credentials were saved",
+                foreground="#a05a22",
+            )
+            self.endpoint_entry.focus_set()
+            messagebox.showerror(
+                APP_NAME,
+                "The API endpoint is not allowed.\n\n"
+                f"{endpoint_error_message(provider_id)}\n\n"
+                "No settings or credentials were saved.",
+            )
+            return
         if provider.requires_key and not api_key:
             messagebox.showwarning(APP_NAME, f"Enter an API key for {provider_name}.")
             if not self.advanced_visible():
@@ -852,21 +979,21 @@ class CK3ModTranslator:
             workers = max(1, min(8, int(self.workers_var.get())))
         except (ValueError, tk.TclError):
             workers = 4
-        if provider.remote and api_key:
+        if self.persistence_enabled:
             try:
-                if self.remember_key_var.get():
+                if self.remember_key_var.get() and api_key:
                     save_api_key(provider_id, api_key)
                 else:
                     delete_api_key(provider_id)
             except OSError as exc:
-                messagebox.showerror(APP_NAME, f"Could not save the API key in Windows Credential Manager.\n\n{exc}")
+                messagebox.showerror(APP_NAME, f"Could not update the credential in Windows Credential Manager.\n\n{exc}")
                 return
         self.save_settings()
         self.set_running(True)
         self.cancel_event.clear()
         self.progress.configure(mode="determinate", value=0)
         target = language_spec(self.target_language_id())
-        model_for_engine = selected_model if provider.remote or self.models_verified else None
+        model_for_engine = selected_model
         self.status_var.set(f"Preparing {len(jobs)} mod(s) for {target.display_name} translation…")
         self.append_log(f"Starting {len(jobs)} mod(s) · provider: {provider_name} · target: {target.display_name}")
 
@@ -959,7 +1086,7 @@ class CK3ModTranslator:
             self.target_language_combo.configure(state="readonly")
             remote = get_provider(self.provider_id()).remote
             self.endpoint_entry.configure(state="readonly" if remote else "normal")
-            self.model_combo.configure(state="normal" if remote else "readonly")
+            self.model_combo.configure(state="normal")
         self.cancel_button.configure(state="normal" if self.running else "disabled")
 
     def set_running(self, running: bool) -> None:
@@ -967,9 +1094,12 @@ class CK3ModTranslator:
         self.update_control_states()
 
     def append_log(self, message: str) -> None:
-        api_key = self.api_key_var.get().strip()
-        if api_key:
-            message = message.replace(api_key, "[API KEY HIDDEN]")
+        secrets = {value.strip() for value in self.api_keys_by_provider.values() if value.strip()}
+        current = self.api_key_var.get().strip()
+        if current:
+            secrets.add(current)
+        for secret in sorted(secrets, key=len, reverse=True):
+            message = message.replace(secret, "[API KEY HIDDEN]")
         self.log.configure(state="normal")
         self.log.insert("end", message.rstrip() + "\n")
         self.log.see("end")
@@ -1064,27 +1194,53 @@ class CK3ModTranslator:
                 return
             raw_models = event.get("models", [])
             models = [str(value) for value in raw_models] if isinstance(raw_models, list) else []
-            self.model_combo.configure(values=models)
+            provider_id = self.provider_id()
+            self.available_models_by_provider[provider_id] = models
+            typed_model = self.selected_model()
+            displayed_models = ([typed_model] if typed_model and typed_model not in models else []) + models
+            self.model_combo.configure(values=displayed_models)
             if models:
                 self.models_verified = True
-                if self.provider_id() == "local" and self.model_var.get() not in models:
+                if not typed_model:
                     self.model_var.set(models[0])
                 selected = self.model_var.get().strip()
                 suffix = f" ({selected})" if selected else ". Select a model."
                 self.server_var.set(f"Connected: {len(models)} model(s){suffix}")
+                if provider_id == "local":
+                    self.provider_hint.configure(
+                        text=f"Localization text stays on this PC · {len(models)} model(s) available",
+                        foreground="#3f7750",
+                    )
             else:
                 self.models_verified = False
-                if self.provider_id() == "local":
-                    self.model_var.set("")
-                self.server_var.set("No models returned. A remote model ID may be entered manually.")
+                if provider_id == "local":
+                    self.server_var.set(
+                        "Connected, but the server reported no models. Load a model in LM Studio and keep the "
+                        "Local Server running, or type the exact model ID manually."
+                    )
+                    self.provider_hint.configure(
+                        text="No local model reported — open Advanced Settings",
+                        foreground="#a05a22",
+                    )
+                else:
+                    self.server_var.set("No models returned. Enter the exact remote model ID manually.")
             self.refresh_button.configure(state="normal" if not self.running else "disabled")
         elif kind == "models_error":
             if event.get("provider") != self.provider_id():
                 return
             self.models_verified = False
-            provider_name = PROVIDER_DISPLAY.get(self.provider_id(), self.provider_id())
-            self.server_var.set(f"Not connected: check {provider_name} settings")
-            self.append_log(f"Connection check: {event.get('message', '')}")
+            provider_id = self.provider_id()
+            provider_name = PROVIDER_DISPLAY.get(provider_id, provider_id)
+            error_message = str(event.get("message", ""))
+            if provider_id == "local":
+                self.server_var.set(local_server_error_message(error_message, self.endpoint_var.get().strip()))
+                self.provider_hint.configure(
+                    text="LM Studio not connected — open Advanced Settings",
+                    foreground="#a05a22",
+                )
+            else:
+                self.server_var.set(f"Not connected: check {provider_name} settings or enter the model ID manually")
+            self.append_log(f"Connection check: {error_message}")
             self.refresh_button.configure(state="normal" if not self.running else "disabled")
         elif kind == "mod_started":
             index = int(event.get("index", 0)) + 1

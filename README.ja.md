@@ -17,6 +17,7 @@ Crusader Kings III（CK3）のMOD保管フォルダを走査し、各MODで実�
 - 文章を持たないスクリプト専用MODを「Non-linguistic」と表示し、翻訳先と同じ言語のMODも選択不可にする
 - 元MOD全体をCK3ローカルMODフォルダへ複製し、選択した翻訳元ローカライズだけを検証済みの翻訳先へ置換
 - ローカルLLM／OpenAI／OpenRouter／NanoGPTを画面で選択
+- LM Studioのnative v1／OpenAI互換／旧v0モデル一覧APIからモデルを検出し、一覧が空でもモデルIDを手動指定可能
 - 翻訳結果を単一の独立CK3 MOD、ランチャー用descriptor、manifest、再現可能なZIPへ自動統合
 - 日本語を含む任意の翻訳先言語と`l_<locale>`ヘッダーに対応
 - `$VALUE$`、`[Character.GetName]`、`#EMP`、`#!`、`@icon!`などのCK3構文を保護
@@ -25,7 +26,7 @@ Crusader Kings III（CK3）のMOD保管フォルダを走査し、各MODで実�
 - 成人向け／NSFW文章を省略・検閲しない翻訳指示
 - UTF-8 BOM、ファイル数、キー、トークン、物理改行、文字化けの検証
 - 既存翻訳を`localization`外へ退避してから安全に導入
-- APIキーをWindows資格情報マネージャーへ暗号化保存し、設定JSON・ログ・manifestには保存しない設計
+- APIキーとローカルサーバー用トークンをWindows資格情報マネージャーへ暗号化保存し、設定JSON・ログ・manifestには保存しない設計
 - リモートAPIキーを公式HTTPSエンドポイント以外へ送信できない許可リスト
 - LLMには翻訳本文だけを担当させ、コピー・検証・descriptor・バックアップ等は通常のPythonで処理
 
@@ -33,10 +34,11 @@ Crusader Kings III（CK3）のMOD保管フォルダを走査し、各MODで実�
 
 [GitHub Releases](https://github.com/Rimcat-JA/translate-ck3-mods/releases/latest)から配布ZIPをダウンロードし、`CK3_Mod_Translator.exe`を起動します。Pythonやコマンド操作は不要です。
 
-1. ローカルLLMを使う場合は、LM Studioでモデルを読み込みLocal Serverを開始します。
-2. 翻訳元は「Auto-detect」、翻訳先は希望する言語を選びます。
-3. CK3のMODフォルダ、別の保管フォルダ、個別MODフォルダ、または`.mod`ファイルを読み込みます。
-4. 検出言語と状態を確認して対象にチェックを付け、「Translate Selected Mods」を押します。
+1. ローカルLLMを使う場合は、LM StudioのLocal Serverを開始します。先にモデルを読み込むか、LM StudioのJust-in-Time（JIT）読み込みを有効にします。
+2. 「Advanced Settings」を開いて「Refresh Models」を押します。一覧から選ぶか、一覧が空ならモデルIDを直接入力します。
+3. 翻訳元は「Auto-detect」、翻訳先は希望する言語を選びます。
+4. CK3のMODフォルダ、別の保管フォルダ、個別MODフォルダ、または`.mod`ファイルを読み込みます。
+5. 検出言語と状態を確認して対象にチェックを付け、「Translate Selected Mods」を押します。
 
 生成物は既定で次へ配置され、CK3ランチャーからすぐ選択できます。
 
@@ -51,9 +53,9 @@ Documents\Paradox Interactive\Crusader Kings III\mod\<元MOD名>_<翻訳先言�
 
 - ローカルLLM：翻訳元本文をPC外へ送信せず、API料金も発生しません。
 - OpenAI／OpenRouter／NanoGPT：翻訳元本文を選択サービスの公式APIへ送信し、料金が発生する場合があります。開始前に確認画面を表示します。
-- APIキー：保存を有効にした場合、Windows資格情報マネージャーへ暗号化保存します。
+- APIキー／ローカルトークン：保存を有効にした場合、Windows資格情報マネージャーへ暗号化保存します。ローカルトークンは、LM Studioの「Require Authentication」を有効にした場合だけ必要です。
 - 設定・ログ・キャッシュ：`%LOCALAPPDATA%\CK3JapaneseModMaker`だけに保存し、自動アップロードしません。v1の設定と翻訳キャッシュを再利用できるよう、保存先名は互換性のため維持しています。
-- ログにはAPIキーと翻訳本文を記録しません。
+- ログにはAPIキー／トークンと翻訳本文を記録しません。
 
 ## 必要なもの
 
@@ -65,6 +67,8 @@ Documents\Paradox Interactive\Crusader Kings III\mod\<元MOD名>_<翻訳先言�
 ソースから実行・ビルドする場合だけPython 3.10以降が必要です。
 
 既定の接続先はLM Studioの`http://127.0.0.1:1234/v1/chat/completions`です。モデル本体はこのリポジトリに含まれません。
+
+「Refresh Models」は、この接続先からサーバーを判定し、LM Studioの`/api/v1/models`、OpenAI互換の`/v1/models`、旧版の`/api/v0/models`を利用できます。JIT読み込みを使う場合やモデル一覧を返さない互換サーバーでも利用できるよう、モデル欄にはモデルIDを直接入力できます。
 
 ## 推奨ローカルLLM
 
@@ -227,6 +231,8 @@ python scripts/ck3_localize.py install `
 
 ## 問題が起きた場合
 
+- 「Refresh Models」でローカルモデルが表示されない場合は、LM StudioのDeveloper画面でサーバーが起動中か、接続先のホストとポートが一致しているかを確認します。次にチャット用モデルをインポート／ダウンロードし、手動で読み込むかJIT読み込みを有効にして再取得してください。それでも空なら、LM Studioに表示される正確なモデルIDをモデル欄へ直接貼り付けます。
+- LM Studioの「Require Authentication」を有効にしている場合は、Advanced SettingsでAPIトークンを入力します。保存は任意で、Windows資格情報マネージャーだけを使用し、設定ファイルやログには書き込みません。
 - トークン保持に失敗する場合は`--batch-items`と`--long-segment`を小さくします。
 - ローカルモデルの同時処理数に合わせて`--workers`を調整します。
 - モデルがJSON Schemaを受け付けない場合、スクリプトは通常のJSON出力へ自動的にフォールバックします。

@@ -41,8 +41,7 @@ Write-Host "SHA256: $($hash.Hash)"
 & $Python (Join-Path $repoRoot "packaging\create_release.py") `
     --exe $exe `
     --guide (Join-Path $repoRoot "packaging\Quick_Start.txt") `
-    --guide-ja (Join-Path $repoRoot "packaging\使い方.txt") `
-    --version "2.0.0"
+    --version "2.0.1"
 
 if ($LASTEXITCODE -ne 0) {
     throw "Release packaging failed with exit code $LASTEXITCODE"

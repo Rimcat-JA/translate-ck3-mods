@@ -69,11 +69,28 @@ def is_loopback_host(host: str) -> bool:
 
 def validate_endpoint(provider_id: str, endpoint: str) -> None:
     provider = get_provider(provider_id)
-    parsed = urllib.parse.urlsplit(endpoint)
-    if not parsed.hostname:
-        raise ValueError(f"Invalid endpoint: {endpoint}")
+    try:
+        parsed = urllib.parse.urlsplit(endpoint)
+        hostname = parsed.hostname
+        # Accessing .port validates malformed and out-of-range ports.
+        _validated_port = parsed.port
+    except ValueError:
+        message = "Invalid local endpoint." if provider.provider_id == "local" else "Invalid provider endpoint."
+        raise ValueError(message) from None
+    if not hostname:
+        message = "Invalid local endpoint." if provider.provider_id == "local" else "Invalid provider endpoint."
+        raise ValueError(message)
     if provider.provider_id == "local":
-        if parsed.scheme not in {"http", "https"} or not is_loopback_host(parsed.hostname):
+        if (
+            parsed.username is not None
+            or parsed.password is not None
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise ValueError(
+                "Local endpoint must not contain credentials, a query, or a fragment."
+            )
+        if parsed.scheme not in {"http", "https"} or not is_loopback_host(hostname):
             raise ValueError("Local LLM mode accepts only localhost, 127.0.0.0/8, or ::1")
         return
     canonical = urllib.parse.urlsplit(provider.chat_endpoint)

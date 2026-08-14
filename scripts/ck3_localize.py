@@ -18,6 +18,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+from ck3_http import RedirectRejectedError, urlopen_no_redirect
 from ck3_languages import (
     discover_locale_files,
     language_spec,
@@ -166,7 +167,7 @@ Return valid JSON only with one translation for every supplied id. Do not think 
             request = urllib.request.Request(self.args.endpoint, data=data, headers=headers, method="POST")
             try:
                 self.throttle()
-                with urllib.request.urlopen(request, timeout=self.args.timeout) as response:
+                with urlopen_no_redirect(request, timeout=self.args.timeout) as response:
                     response_data = json.loads(response.read().decode("utf-8"))
                 self.check_cancelled()
                 content = response_data["choices"][0]["message"].get("content")
@@ -216,7 +217,7 @@ Return valid JSON only with one translation for every supplied id. Do not think 
             if len(record.source) > self.args.long_threshold:
                 try:
                     return {record.item_id: self.translate_long(record)}, {}
-                except TranslationCancelled:
+                except (TranslationCancelled, RedirectRejectedError):
                     raise
                 except Exception as exc:  # noqa: BLE001 - isolate an arbitrary provider/model failure to this record
                     return {}, {record.item_id: str(exc)}
@@ -227,14 +228,14 @@ Return valid JSON only with one translation for every supplied id. Do not think 
                     if not invalid:
                         return valid, {}
                     last_error = "model output failed validation"
-                except TranslationCancelled:
+                except (TranslationCancelled, RedirectRejectedError):
                     raise
                 except Exception as exc:  # noqa: BLE001 - retry arbitrary provider/model failures per record
                     last_error = str(exc)
             return {}, {record.item_id: last_error}
         try:
             valid, invalid = self.translate_once(batch)
-        except TranslationCancelled:
+        except (TranslationCancelled, RedirectRejectedError):
             raise
         except Exception:  # noqa: BLE001 - recursively isolate a failing provider/model response
             midpoint = len(batch) // 2
@@ -267,7 +268,7 @@ Return valid JSON only with one translation for every supplied id. Do not think 
                         output.append(leading + result + trailing)
                         break
                     last_error = "placeholder mismatch"
-                except TranslationCancelled:
+                except (TranslationCancelled, RedirectRejectedError):
                     raise
                 except Exception as exc:  # noqa: BLE001 - retry arbitrary provider/model failures per segment
                     last_error = str(exc)
@@ -842,7 +843,11 @@ def build_parser() -> argparse.ArgumentParser:
     translate.add_argument("--cache", required=True, help="SQLite translation-memory path")
     translate.add_argument("--endpoint", help="provider chat-completions endpoint; uses the selected provider default when omitted")
     translate.add_argument("--provider", choices=tuple(PROVIDERS), default="local")
-    translate.add_argument("--model", required=True, help="model id returned by the local server")
+    translate.add_argument(
+        "--model",
+        required=True,
+        help="exact provider model id; LM Studio may JIT-load a downloaded model",
+    )
     translate.add_argument("--api-key-env", help="optional environment variable containing a bearer token")
     translate.add_argument("--glossary", help="UTF-8 JSON source-to-target glossary")
     translate.add_argument("--extra-instructions", help="UTF-8 text file appended to the system prompt")

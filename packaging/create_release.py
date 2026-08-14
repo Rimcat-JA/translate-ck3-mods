@@ -25,8 +25,12 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--exe", required=True)
     parser.add_argument("--guide", required=True)
-    parser.add_argument("--guide-ja")
-    parser.add_argument("--version", default="2.0.0")
+    parser.add_argument(
+        "--guide-ja",
+        default=str(Path(__file__).with_name("使い方.txt")),
+        help="Japanese quick-start guide (defaults beside this script)",
+    )
+    parser.add_argument("--version", default="2.0.1")
     args = parser.parse_args()
     executable = Path(args.exe).resolve()
     guide = Path(args.guide).resolve()
